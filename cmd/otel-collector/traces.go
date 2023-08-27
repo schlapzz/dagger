@@ -174,7 +174,14 @@ func (c *TraceExporter) TraceID() string {
 }
 
 func newExporter() (trace.SpanExporter, error) {
-	return otlptracegrpc.New(context.Background())
+
+	enpoint := "127.0.0.1:4317"
+	e, ok := os.LookupEnv("OTEL_ENDPOINT")
+	if ok {
+		enpoint = e
+	}
+
+	return otlptracegrpc.New(context.Background(), otlptracegrpc.WithInsecure(), otlptracegrpc.WithEndpoint(enpoint))
 }
 
 func newResource() *resource.Resource {
