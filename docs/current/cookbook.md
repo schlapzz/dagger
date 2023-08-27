@@ -345,7 +345,7 @@ The following code listing builds a single image for different CPU architectures
 
 ### Build image from Dockerfile
 
-The following code listing builds an image using an existing Dockerfile.
+The following code listing builds an image from a Dockerfile in the current working directory on the host.
 
 <Tabs groupId="language">
 <TabItem value="Go">
@@ -363,6 +363,33 @@ The following code listing builds an image using an existing Dockerfile.
 <TabItem value="Python">
 
 ```python file=./quickstart/snippets/build-dockerfile/main.py
+```
+
+</TabItem>
+</Tabs>
+
+[Learn more](./quickstart/429462-build-dockerfile.mdx)
+
+### Build image from Dockerfile using different build context
+
+The following code listing builds an image from a Dockerfile using a build context directory in a different location than the current working directory.
+
+<Tabs groupId="language">
+<TabItem value="Go">
+
+```go file=./cookbook/snippets/build-dockerfile/main.go
+```
+
+</TabItem>
+<TabItem value="Node.js">
+
+```javascript file=./cookbook/snippets/build-dockerfile/index.mjs
+```
+
+</TabItem>
+<TabItem value="Python">
+
+```python file=./cookbook/snippets/build-dockerfile/main.py
 ```
 
 </TabItem>
@@ -655,6 +682,38 @@ The following code listing demonstrates how to inject a file in a container as a
 
 [Learn more](./guides/723462-use-secrets.md)
 
+### Use secret in Dockerfile build
+
+The following code listing demonstrates how to inject a secret into a Dockerfile build. The secret is automatically mounted in the build container at `/run/secrets/SECRET-ID`.
+
+<Tabs groupId="language">
+<TabItem value="Go">
+
+```go file=./guides/snippets/use-secrets/dockerfile/main.go
+```
+
+</TabItem>
+<TabItem value="Node.js">
+
+```javascript file=./guides/snippets/use-secrets/dockerfile/index.mjs
+```
+
+</TabItem>
+<TabItem value="Python">
+
+```python file=./guides/snippets/use-secrets/dockerfile/main.py
+```
+
+</TabItem>
+</Tabs>
+
+The sample Dockerfile below demonstrates the process of mounting the secret using a [`secret` filesystem mount type](https://docs.docker.com/engine/reference/builder/#run---mounttypesecret) and using it in the Dockerfile build process:
+
+```dockerfile file=./guides/snippets/use-secrets/dockerfile/Dockerfile
+```
+
+[Learn more](./guides/723462-use-secrets.md)
+
 ### Load secret from Google Cloud Secret Manager
 
 The following code listing reads a secret (a GitHub API token) from Google Cloud Secret Manager and uses it in a Dagger pipeline to interact with the GitHub API.
@@ -888,19 +947,19 @@ The following code listing demonstrates how to add multiple environment variable
 <Tabs groupId="language">
 <TabItem value="Go">
 
-```go file=./cookbook/snippets/environment-variables/main.go
+```go file=./guides/snippets/custom-callbacks/environment-variables/main.go
 ```
 
 </TabItem>
 <TabItem value="Node.js">
 
-```javascript file=./cookbook/snippets/environment-variables/index.ts
+```javascript file=./guides/snippets/custom-callbacks/environment-variables/index.mts
 ```
 
 </TabItem>
 <TabItem value="Python">
 
-```python file=./cookbook/snippets/environment-variables/main.py
+```python file=./guides/snippets/custom-callbacks/environment-variables/main.py
 ```
 
 </TabItem>
@@ -910,11 +969,7 @@ The following code listing demonstrates how to add multiple environment variable
 
 ### Docker Engine
 
-The following code shows different ways to integrate with the Docker Engine.
-
-#### Connecting to Docker Engine on the host
-
-This shows how to connect to a Docker Engine on the host machine, by mounting the Docker unix socket into a container, and running the `docker` CLI.
+The following code listing shows how to connect to a Docker Engine on the host machine, by mounting the Docker UNIX socket into a container, and running the `docker` CLI.
 
 <Tabs groupId="language">
 <TabItem value="Go">
@@ -937,7 +992,35 @@ This shows how to connect to a Docker Engine on the host machine, by mounting th
 ```
 
 </TabItem>
+</Tabs>
 
+### Tailscale
+
+The following code listing shows how to have a container running in a Dagger pipeline access a Tailscale network using Tailscale's [userspace networking](https://tailscale.com/kb/1112/userspace-networking/).
+
+Set the `TAILSCALE_AUTHKEY` host environment variable to a [Tailscale authentication key](https://tailscale.com/kb/1085/auth-keys/) and the `TAILSCALE_SERVICE_URL` host environment variable to a URL accessibly only on the Tailscale network.
+
+<Tabs groupId="language">
+<TabItem value="Go">
+
+```go file=./cookbook/snippets/tailscale-networking/main.go
+```
+
+</TabItem>
+
+<TabItem value="Node.js">
+
+```javascript file=./cookbook/snippets/tailscale-networking/index.mjs
+```
+
+</TabItem>
+
+<TabItem value="Python">
+
+```python file=./cookbook/snippets/tailscale-networking/main.py
+```
+
+</TabItem>
 </Tabs>
 
 ### AWS Cloud Development Kit
