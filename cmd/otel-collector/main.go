@@ -54,12 +54,6 @@ var cmd = &cobra.Command{
 		fmt.Fprintf(os.Stderr, "=> traces completed in %s\n", time.Since(now))
 
 		now = time.Now()
-		if err := logSummary(name, vertices, tags, trace.TraceID()); err != nil {
-			return err
-		}
-		fmt.Fprintf(os.Stderr, "=> logs completed in %s\n", time.Since(now))
-
-		now = time.Now()
 		printSummary(os.Stdout, trace)
 		fmt.Fprintf(os.Stderr, "=> summary completed in %s\n", time.Since(now))
 		return nil
