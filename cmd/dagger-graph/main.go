@@ -19,6 +19,8 @@ import (
 	"oss.terrastruct.com/d2/d2renderers/d2svg"
 	"oss.terrastruct.com/d2/d2themes/d2themescatalog"
 	"oss.terrastruct.com/d2/lib/textmeasure"
+
+	"github.com/mazznoer/colorgrad"
 )
 
 func main() {
@@ -76,6 +78,20 @@ func loadEvents(journal string) *telemetry.Pipeliner {
 func generateGraph(vertices []*telemetry.PipelinedVertex) string {
 	s := strings.Builder{}
 
+	max, _ := time.ParseDuration("0ms")
+	for _, v := range vertices {
+		w := WrappedVertex{v}
+
+		if w.Internal() {
+			continue
+		}
+		if max < v.Duration() {
+			max = v.Duration()
+		}
+	}
+
+	grad := colorgrad.Plasma()
+
 	vertexToGraphID := map[string]string{}
 	for _, v := range vertices {
 		w := WrappedVertex{v}
@@ -91,17 +107,27 @@ func generateGraph(vertices []*telemetry.PipelinedVertex) string {
 		graphPath = append(graphPath, fmt.Sprintf("%q", w.ID()))
 		graphID := strings.Join(graphPath, ".")
 
+		fill := fmt.Sprintf("\"%s\"", grad.At(1.0/max.Abs().Seconds()*w.Duration().Seconds()).Hex())
+
 		duration := w.Duration().Round(time.Second / 10).String()
 		if w.Cached() {
 			duration = "CACHED"
+			fill = "white"
 		}
 
 		// `$` has special meaning in D2
 		name := strings.ReplaceAll(w.Name(), "$", "") + " (" + duration + ")"
 
+		if w.v.Error != nil {
+			name = "⛔ " + name
+		}
+
 		vertexToGraphID[w.ID()] = graphID
 		s.WriteString(graphID + ": {\n")
 		s.WriteString(fmt.Sprintf("  label: %q\n", name))
+		s.WriteString("  style: {\n")
+		s.WriteString(fmt.Sprintf("    fill: %s\n", fill))
+		s.WriteString("  }\n")
 		s.WriteString("}\n")
 	}
 

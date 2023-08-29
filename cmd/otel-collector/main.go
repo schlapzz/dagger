@@ -54,7 +54,7 @@ var cmd = &cobra.Command{
 		fmt.Fprintf(os.Stderr, "=> traces completed in %s\n", time.Since(now))
 
 		now = time.Now()
-		printSummary(os.Stdout, trace)
+		//printSummary(os.Stdout, trace)
 		fmt.Fprintf(os.Stderr, "=> summary completed in %s\n", time.Since(now))
 		return nil
 	},
