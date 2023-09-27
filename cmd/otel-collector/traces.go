@@ -9,7 +9,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	otrace "go.opentelemetry.io/otel/trace"
 
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -175,13 +175,13 @@ func (c *TraceExporter) TraceID() string {
 
 func newExporter() (trace.SpanExporter, error) {
 
-	enpoint := "127.0.0.1:4317"
+	enpoint := "127.0.0.1:4318"
 	e, ok := os.LookupEnv("OTEL_ENDPOINT")
 	if ok {
 		enpoint = e
 	}
-
-	return otlptracegrpc.New(context.Background(), otlptracegrpc.WithInsecure(), otlptracegrpc.WithEndpoint(enpoint))
+	return otlptracehttp.New(context.Background(), otlptracehttp.WithEndpoint(enpoint))
+	//return otlptracegrpc.New(context.Background(), otlptracegrpc.WithEndpoint(enpoint))
 }
 
 func newResource() *resource.Resource {
