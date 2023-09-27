@@ -1,0 +1,626 @@
+[
+ {
+  "id": "2291231604",
+  "title": "copy ./web/bafu-sam-shared (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "2970893260",
+  "title": "copy ./core (1.3s)",
+  "subtitle": "",
+  "mainstat": "1.3s",
+  "secpndarystat": "",
+  "color": "\"#0d0887\""
+ },
+ {
+  "id": "380910504",
+  "title": "merge ([test 2/2] RUN /opt/docker-scripts/fix_permissions /opt/app-root/src, copy /Gemfile /opt/app-root/src/Gemfile) (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "3336048164",
+  "title": "exec docker-entrypoint.sh sh -c  yarn lint:eslint:ci; echo -n ?  \u003e eslint-next linter web-exit_code (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "1151363354",
+  "title": "exec sh -c  bundle exec rake db:setup erd; echo -n ?  \u003e test:erd-exit_code (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "494291652",
+  "title": "copy / /opt/app-root/doc/architektur/models (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "2192349415",
+  "title": "merge (merge (merge (copy ./core, copy / /abraxas), copy / /bafu-sam-shared), copy / /doc) (100ms)",
+  "subtitle": "",
+  "mainstat": "100ms",
+  "secpndarystat": "",
+  "color": "\"#0d0887\""
+ },
+ {
+  "id": "720974076",
+  "title": "copy /Gemfile.lock /opt/app-root/src/Gemfile.lock (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "1810622013",
+  "title": "merge (merge (exec bundle install, copy / /opt/app-root/src), copy / /opt/app-root/src/web/bafu-sam-shared) (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "1275246956",
+  "title": "copy ./doc (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "1952013060",
+  "title": "pull registry.puzzle.ch/docker.io/node:16.10 (0s)",
+  "subtitle": "",
+  "mainstat": "0s",
+  "secpndarystat": "",
+  "color": "\"#0d0887\""
+ },
+ {
+  "id": "3732351536",
+  "title": "exec sh -c  bundle exec rails web:check_links; echo -n ?  \u003e test:weblink_checks-exit_code (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "3626852260",
+  "title": "exec docker-entrypoint.sh sh -c  yarn test:ci; echo -n ?  \u003e test:jest-exit_code (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "46314391",
+  "title": "[run_base 3/9] RUN     apt-get update \u0026\u0026     apt-get upgrade -y \u0026\u0026     apt-get install -y libpq-dev libgeos-dev vim-tiny curl python3 python3-pip libvips git imagemagick libpq5 postgresql-client libgeos-dev libjemalloc-dev libjemalloc2 ffmpeg (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "285481521",
+  "title": "exec bundle install (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "3028014727",
+  "title": "exec bundle exec rubocop -c .rubocop_with_todo.yml (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "4056129852",
+  "title": "exec /opt/bitnami/scripts/postgresql/timescaledb-bitnami-entrypoint.sh /opt/bitnami/scripts/postgresql/run.sh (-2562047h47m16.854775808s)",
+  "subtitle": "",
+  "mainstat": "-2562047h47m16.854775808s",
+  "secpndarystat": "",
+  "color": "\"#0d0887\""
+ },
+ {
+  "id": "2745495901",
+  "title": "copy / /bafu-sam-shared (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "322073814",
+  "title": "upload doc/architektur/models/ (100ms)",
+  "subtitle": "",
+  "mainstat": "100ms",
+  "secpndarystat": "",
+  "color": "\"#0d0887\""
+ },
+ {
+  "id": "468964996",
+  "title": "upload core (300ms)",
+  "subtitle": "",
+  "mainstat": "300ms",
+  "secpndarystat": "",
+  "color": "\"#0d0887\""
+ },
+ {
+  "id": "2817882109",
+  "title": "exec sh -c  yarn install --pure-lockfile --prefer-offline --cache-folder .yarn; echo -n ?  \u003e dependencies:yarn-install-exit_code (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "2087123345",
+  "title": "copy / / (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "3527048644",
+  "title": "exec mkdir vendor (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "2431189919",
+  "title": "merge (merge (exec bundle install, copy / /opt/app-root/src), copy / /opt/app-root/doc/architektur/models) (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "1599966289",
+  "title": "copy / /opt/app-root/src (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "4221612618",
+  "title": "[run_base 1/9] FROM registry.puzzle.ch/docker.io/ruby:3.1.1-slim@sha256:b7e41f3eb3205ffffd3f1cbce6e6d6ea939c0e19aaadad3c985197e08e748029 (0s)",
+  "subtitle": "",
+  "mainstat": "0s",
+  "secpndarystat": "",
+  "color": "\"#0d0887\""
+ },
+ {
+  "id": "1239331034",
+  "title": "copy ./core/public/api/ (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "913859476",
+  "title": "copy ./web/bafu-sam (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "2742448220",
+  "title": "upload ./core (4.1s)",
+  "subtitle": "",
+  "mainstat": "4.1s",
+  "secpndarystat": "",
+  "color": "\"#0d0887\""
+ },
+ {
+  "id": "2220221214",
+  "title": "upload ./abraxas (400ms)",
+  "subtitle": "",
+  "mainstat": "400ms",
+  "secpndarystat": "",
+  "color": "\"#0d0887\""
+ },
+ {
+  "id": "2586584722",
+  "title": "[run_base 2/9] RUN adduser --disabled-password --uid 1001 --gid 0 --gecos \"\" app (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "1015536723",
+  "title": "merge (merge (copy ./core, copy / /abraxas), copy / /bafu-sam-shared) (0s)",
+  "subtitle": "",
+  "mainstat": "0s",
+  "secpndarystat": "",
+  "color": "\"#0d0887\""
+ },
+ {
+  "id": "2755086798",
+  "title": "[dev_base 2/2] RUN /opt/docker-scripts/install_chrome_chromedriver (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "2522707366",
+  "title": "exec sh -c  yarn lint:ts; echo -n ?  \u003e lint:typescript_public_web-exit_code (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "337995003",
+  "title": "exec sh -c  bundle exec rails db:test:migrations; echo -n ?  \u003e test:migration-exit_code (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "355522808",
+  "title": "upload core (400ms)",
+  "subtitle": "",
+  "mainstat": "400ms",
+  "secpndarystat": "",
+  "color": "\"#0d0887\""
+ },
+ {
+  "id": "2312805099",
+  "title": "merge (exec docker-entrypoint.sh yarn install --pure-lockfile --prefer-offline --cache-folder .yarn, copy / /core/public/api) (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "2955977084",
+  "title": "copy ./abraxas (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "2417048693",
+  "title": "copy / /doc (200ms)",
+  "subtitle": "",
+  "mainstat": "200ms",
+  "secpndarystat": "",
+  "color": "\"#0d0887\""
+ },
+ {
+  "id": "3022458957",
+  "title": "copy /coverage / (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "1710135021",
+  "title": "exec sh -c  bundle exec rake db:setup graphiti:check_schema; echo -n ?  \u003e test:graphiti 💯-exit_code (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "3862119762",
+  "title": "exec docker-entrypoint.sh sh -c  yarn lint:ts; echo -n ?  \u003e lint:typescript-next-exit_code (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "1589302989",
+  "title": "exec docker-entrypoint.sh sh -c  yarn types:check; echo -n ?  \u003e lint:spraypaint_next-exit_code (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "2295085943",
+  "title": "[run_base 6/9] COPY abraxas abraxas (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "2157769817",
+  "title": "exec sh -c  bundle exec brakeman --format html -o /tmp/index.html; echo -n ?  \u003e lint:brakeman-exit_code (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "3159219401",
+  "title": "resolve image config for registry.puzzle.ch/cschlatter/sam-timescale-postgis:latest (300ms)",
+  "subtitle": "",
+  "mainstat": "300ms",
+  "secpndarystat": "",
+  "color": "\"#0d0887\""
+ },
+ {
+  "id": "867472758",
+  "title": "copy /Gemfile /opt/app-root/src/Gemfile (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "3043044748",
+  "title": "copy doc/architektur/models/ (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "1397403842",
+  "title": "copy / /core/public/api (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "3354058053",
+  "title": "exec sh -c  bundle exec bundle audit check --update --output /tmp/bundle-audit.json; echo -n ?  \u003e lint:bundle_audit-exit_code (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "164702342",
+  "title": "merge (exec bundle install, copy / /opt/app-root/src) (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "2941676965",
+  "title": "exec sh -c  yarn lint:eslint:ci; echo -n ?  \u003e lint:eslint_public_web-exit_code (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "1852176049",
+  "title": "exec docker-entrypoint.sh yarn install --pure-lockfile --prefer-offline --cache-folder .yarn (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "4064717560",
+  "title": "copy / /abraxas (100ms)",
+  "subtitle": "",
+  "mainstat": "100ms",
+  "secpndarystat": "",
+  "color": "\"#0d0887\""
+ },
+ {
+  "id": "2254146955",
+  "title": "merge (merge (pull registry.puzzle.ch/docker.io/node:16.10, copy ./web/bafu-sam), copy / /bafu-sam-shared) (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "615983174",
+  "title": "upload ./doc (800ms)",
+  "subtitle": "",
+  "mainstat": "800ms",
+  "secpndarystat": "",
+  "color": "\"#0d0887\""
+ },
+ {
+  "id": "2844894377",
+  "title": "copy core (include Gemfile.lock) (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "622440217",
+  "title": "[run_base 7/9] RUN     cp abraxas/proxywg.crt /usr/local/share/ca-certificates \u0026\u0026     cp abraxas/uvek_root_ca_auth.crt /usr/local/share/ca-certificates \u0026\u0026     update-ca-certificates (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "3589131180",
+  "title": "resolve image config for registry.puzzle.ch/docker.io/node:16.10 (100ms)",
+  "subtitle": "",
+  "mainstat": "100ms",
+  "secpndarystat": "",
+  "color": "\"#0d0887\""
+ },
+ {
+  "id": "2627817155",
+  "title": "merge (copy ./core, copy / /abraxas) (100ms)",
+  "subtitle": "",
+  "mainstat": "100ms",
+  "secpndarystat": "",
+  "color": "\"#0d0887\""
+ },
+ {
+  "id": "788691222",
+  "title": "[run_base 9/9] RUN     rm -rf /opt/app-root/src/bafu-sam-shared \u0026\u0026     chgrp -R 0 /opt/app-root/web/bafu-sam-shared (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "3885706155",
+  "title": "go run -v dagger/main.go (36.9s)",
+  "subtitle": "",
+  "mainstat": "36.9s",
+  "secpndarystat": "",
+  "color": "\"#0d0887\""
+ },
+ {
+  "id": "2116387508",
+  "title": "[dev_base 1/2] RUN apt-get install -y graphviz gnupg unzip (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "1104866892",
+  "title": "pull registry.puzzle.ch/cschlatter/sam-timescale-postgis:latest (6.4s)",
+  "subtitle": "",
+  "mainstat": "6.4s",
+  "secpndarystat": "",
+  "color": "\"#0d0887\""
+ },
+ {
+  "id": "2735542643",
+  "title": "copy core (include Gemfile) (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "277527406",
+  "title": "[test 1/2] WORKDIR /opt/app-root/src (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "3128202695",
+  "title": "[run_base 4/9] COPY config/docker/bin /opt/docker-scripts/ (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "93496407",
+  "title": "[run_base 8/9] COPY bafu-sam-shared /opt/app-root/web/bafu-sam-shared (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "2418411579",
+  "title": "[run_base 5/9] RUN     /opt/docker-scripts/install_node 16 \u0026\u0026     /opt/docker-scripts/install_yarn 1.22.10 \u0026\u0026     /opt/docker-scripts/install_bundler 2.3.16 \u0026\u0026     /opt/docker-scripts/install_plotly (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "2687676443",
+  "title": "merge (merge ([test 2/2] RUN /opt/docker-scripts/fix_permissions /opt/app-root/src, copy /Gemfile /opt/app-root/src/Gemfile), copy /Gemfile.lock /opt/app-root/src/Gemfile.lock) (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "2126808666",
+  "title": "merge (pull registry.puzzle.ch/docker.io/node:16.10, copy ./web/bafu-sam) (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "2283460262",
+  "title": "exec sh -c  bundle exec rake db:setup db:test:prepare spec; echo -n ?  \u003e test:rspec-exit_code (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "3429409479",
+  "title": "copy / /opt/app-root/src/web/bafu-sam-shared (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "291162509",
+  "title": "upload ./web/bafu-sam (400ms)",
+  "subtitle": "",
+  "mainstat": "400ms",
+  "secpndarystat": "",
+  "color": "\"#0d0887\""
+ },
+ {
+  "id": "3681817183",
+  "title": "upload ./web/bafu-sam-shared (200ms)",
+  "subtitle": "",
+  "mainstat": "200ms",
+  "secpndarystat": "",
+  "color": "\"#0d0887\""
+ },
+ {
+  "id": "710331251",
+  "title": "exec docker-entrypoint.sh sh -c  yarn audit; echo -n ?  \u003e lint:yarn_audit-exit_code (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ },
+ {
+  "id": "3328167515",
+  "title": "upload ./core/public/api/ (100ms)",
+  "subtitle": "",
+  "mainstat": "100ms",
+  "secpndarystat": "",
+  "color": "\"#0d0887\""
+ },
+ {
+  "id": "3851107682",
+  "title": "[test 2/2] RUN /opt/docker-scripts/fix_permissions /opt/app-root/src (CACHED)",
+  "subtitle": "",
+  "mainstat": "CACHED",
+  "secpndarystat": "",
+  "color": "white"
+ }
+]

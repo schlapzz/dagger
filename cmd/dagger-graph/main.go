@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
+	"io/ioutil"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/dagger/dagger/telemetry"
+	"github.com/google/uuid"
 	"github.com/vito/progrock"
 
 	"oss.terrastruct.com/d2/d2graph"
@@ -23,6 +26,21 @@ import (
 	"github.com/mazznoer/colorgrad"
 )
 
+type Edge struct {
+	ID     string `json:"id"`
+	Source string `json:"source"`
+	Target string `json:"target"`
+}
+
+type Node struct {
+	ID            string `json:"id"`
+	Title         string `json:"title"`
+	Subtitle      string `json:"subtitle"`
+	Mainstat      string `json:"mainstat"`
+	SecondaryStat string `json:"secpndarystat"`
+	Color         string `json:"color"`
+}
+
 func main() {
 	if len(os.Args) < 3 {
 		fmt.Fprintf(os.Stderr, "Usage: %s <input journal> <output svg>\n", os.Args[0])
@@ -33,6 +51,7 @@ func main() {
 		output = os.Args[2]
 	)
 	pl := loadEvents(input)
+	generateGrafanaGraph(pl.Vertices())
 	graph := generateGraph(pl.Vertices())
 	svg, err := renderSVG(graph)
 	if err != nil {
@@ -172,4 +191,105 @@ func renderSVG(graph string) ([]byte, error) {
 	return d2svg.Render(diagram, &d2svg.RenderOpts{
 		Pad: d2svg.DEFAULT_PADDING,
 	})
+}
+
+func generateGrafanaGraph(vertices []*telemetry.PipelinedVertex) error {
+	nodes := make([]Node, 0)
+	edges := make([]Edge, 0)
+
+	max, _ := time.ParseDuration("0ms")
+	for _, v := range vertices {
+		w := WrappedVertex{v}
+
+		if w.Internal() {
+			continue
+		}
+		if max < v.Duration() {
+			max = v.Duration()
+		}
+	}
+
+	grad := colorgrad.Plasma()
+
+	vertexToGraphID := map[string]string{}
+	for _, v := range vertices {
+		w := WrappedVertex{v}
+
+		if w.Internal() {
+			continue
+		}
+
+		graphPath := []string{}
+		for _, p := range w.Pipeline() {
+			graphPath = append(graphPath, fmt.Sprintf("%q", p.Name))
+		}
+		graphPath = append(graphPath, fmt.Sprintf("%q", w.ID()))
+		graphID := strings.Join(graphPath, ".")
+
+		fill := fmt.Sprintf("\"%s\"", grad.At(1.0/max.Abs().Seconds()*w.Duration().Seconds()).Hex())
+
+		duration := w.Duration().Round(time.Second / 10).String()
+		if w.Cached() {
+			duration = "CACHED"
+			fill = "white"
+		}
+
+		// `$` has special meaning in D2
+		name := strings.ReplaceAll(w.Name(), "$", "") + " (" + duration + ")"
+
+		vertexToGraphID[w.ID()] = graphID
+
+		n := Node{
+			ID:       hash(graphID),
+			Title:    name,
+			Color:    fill,
+			Mainstat: duration,
+		}
+
+		nodes = append(nodes, n)
+	}
+
+	//Create edged
+	for _, v := range vertices {
+
+		w := WrappedVertex{v}
+		if w.Internal() {
+			continue
+		}
+
+		graphID := vertexToGraphID[w.ID()]
+		if graphID == "" {
+			fmt.Printf("id %s not found\n", w.ID())
+			continue
+		}
+		for _, input := range w.Inputs() {
+			source := vertexToGraphID[input]
+			if source == "" {
+				continue
+			}
+			e := Edge{
+				ID:     uuid.NewString(),
+				Source: hash(source),
+				Target: hash(graphID),
+			}
+			edges = append(edges, e)
+		}
+
+	}
+
+	file, _ := json.MarshalIndent(nodes, "", " ")
+
+	_ = ioutil.WriteFile("nodes.json", file, 0644)
+
+	file2, _ := json.MarshalIndent(edges, "", " ")
+
+	_ = ioutil.WriteFile("edges.json", file2, 0644)
+
+	return nil
+}
+
+func hash(s string) string {
+	h := fnv.New32a()
+	h.Write([]byte(s))
+	return fmt.Sprintf("%d", h.Sum32())
 }
