@@ -226,7 +226,7 @@ func generateGrafanaGraph(vertices []*telemetry.PipelinedVertex) error {
 		graphPath = append(graphPath, fmt.Sprintf("%q", w.ID()))
 		graphID := strings.Join(graphPath, ".")
 
-		fill := fmt.Sprintf("\"%s\"", grad.At(1.0/max.Abs().Seconds()*w.Duration().Seconds()).Hex())
+		fill := fmt.Sprintf("%s", grad.At(1.0/max.Abs().Seconds()*w.Duration().Seconds()).Hex())
 
 		duration := w.Duration().Round(time.Second / 10).String()
 		if w.Cached() {
