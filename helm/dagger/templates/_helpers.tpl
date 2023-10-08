@@ -41,6 +41,9 @@ app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 app.kubernetes.io/part-of: {{ template "dagger.name" . }}
+{{- if .Values.commonLabels }}
+{{ .Values.commonLabels | toYaml }}
+{{- end}}
 {{- end }}
 
 {{/*
