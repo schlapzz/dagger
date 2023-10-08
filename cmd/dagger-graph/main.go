@@ -277,13 +277,15 @@ func generateGrafanaGraph(vertices []*telemetry.PipelinedVertex) error {
 
 	}
 
+	os.MkdirAll("out/graph/", 0777)
+
 	file, _ := json.MarshalIndent(nodes, "", " ")
 
-	_ = ioutil.WriteFile("nodes.json", file, 0644)
+	_ = ioutil.WriteFile("out/graph/nodes.json", file, 0644)
 
 	file2, _ := json.MarshalIndent(edges, "", " ")
 
-	_ = ioutil.WriteFile("edges.json", file2, 0644)
+	_ = ioutil.WriteFile("out/graph/edges.json", file2, 0644)
 
 	return nil
 }
