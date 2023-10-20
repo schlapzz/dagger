@@ -7,6 +7,53 @@ defmodule Dagger.Container do
   defstruct [:selection, :client]
 
   (
+    @doc "Turn the container into a Service.\n\nBe sure to set any exposed ports before this conversion."
+    @spec as_service(t()) :: Dagger.Service.t()
+    def as_service(%__MODULE__{} = container) do
+      selection = select(container.selection, "asService")
+      %Dagger.Service{selection: selection, client: container.client}
+    end
+  )
+
+  (
+    @doc "Returns a File representing the container serialized to a tarball.\n\n\n\n## Optional Arguments\n\n* `platform_variants` - Identifiers for other platform specific containers.\nUsed for multi-platform image.\n* `forced_compression` - Force each layer of the image to use the specified compression algorithm.\nIf this is unset, then if a layer already has a compressed blob in the engine's\ncache, that will be used (this can result in a mix of compression algorithms for\ndifferent layers). If this is unset and a layer has no compressed blob in the\nengine's cache, then it will be compressed using Gzip.\n* `media_types` - Use the specified media types for the image's layers. Defaults to OCI, which\nis largely compatible with most recent container runtimes, but Docker may be needed\nfor older runtimes without OCI support."
+    @spec as_tarball(t(), keyword()) :: Dagger.File.t()
+    def as_tarball(%__MODULE__{} = container, optional_args \\ []) do
+      selection = select(container.selection, "asTarball")
+
+      selection =
+        if is_nil(optional_args[:platform_variants]) do
+          selection
+        else
+          ids =
+            optional_args[:platform_variants]
+            |> Enum.map(fn value ->
+              {:ok, id} = Dagger.Container.id(value)
+              id
+            end)
+
+          arg(selection, "platformVariants", ids)
+        end
+
+      selection =
+        if is_nil(optional_args[:forced_compression]) do
+          selection
+        else
+          arg(selection, "forcedCompression", optional_args[:forced_compression])
+        end
+
+      selection =
+        if is_nil(optional_args[:media_types]) do
+          selection
+        else
+          arg(selection, "mediaTypes", optional_args[:media_types])
+        end
+
+      %Dagger.File{selection: selection, client: container.client}
+    end
+  )
+
+  (
     @doc "Initializes this container from a Dockerfile build.\n\n## Required Arguments\n\n* `context` - Directory context used by the Dockerfile.\n\n## Optional Arguments\n\n* `dockerfile` - Path to the Dockerfile to use.\n\nDefault: './Dockerfile'.\n* `build_args` - Additional build arguments.\n* `target` - Target build stage to build.\n* `secrets` - Secrets to pass to the build.\n\nThey will be mounted at /run/secrets/[secret-name] in the build container\n\nThey can be accessed in the Dockerfile using the \"secret\" mount type\nand mount path /run/secrets/[secret-name]\ne.g. RUN --mount=type=secret,id=my-secret curl url?token=$(cat /run/secrets/my-secret)\""
     @spec build(t(), Dagger.Directory.t(), keyword()) :: Dagger.Container.t()
     def build(%__MODULE__{} = container, context, optional_args \\ []) do
@@ -72,30 +119,6 @@ defmodule Dagger.Container do
       selection = select(container.selection, "directory")
       selection = arg(selection, "path", path)
       %Dagger.Directory{selection: selection, client: container.client}
-    end
-  )
-
-  (
-    @doc "Retrieves an endpoint that clients can use to reach this container.\n\nIf no port is specified, the first exposed port is used. If none exist an error is returned.\n\nIf a scheme is specified, a URL is returned. Otherwise, a host:port pair is returned.\n\nCurrently experimental; set _EXPERIMENTAL_DAGGER_SERVICES_DNS=0 to disable.\n\n\n\n## Optional Arguments\n\n* `port` - The exposed port number for the endpoint\n* `scheme` - Return a URL with the given scheme, eg. http for http://"
-    @spec endpoint(t(), keyword()) :: {:ok, Dagger.String.t()} | {:error, term()}
-    def endpoint(%__MODULE__{} = container, optional_args \\ []) do
-      selection = select(container.selection, "endpoint")
-
-      selection =
-        if is_nil(optional_args[:port]) do
-          selection
-        else
-          arg(selection, "port", optional_args[:port])
-        end
-
-      selection =
-        if is_nil(optional_args[:scheme]) do
-          selection
-        else
-          arg(selection, "scheme", optional_args[:scheme])
-        end
-
-      execute(selection, container.client)
     end
   )
 
@@ -173,7 +196,7 @@ defmodule Dagger.Container do
   )
 
   (
-    @doc "Retrieves the list of exposed ports.\n\nThis includes ports already exposed by the image, even if not\nexplicitly added with dagger.\n\nCurrently experimental; set _EXPERIMENTAL_DAGGER_SERVICES_DNS=0 to disable."
+    @doc "Retrieves the list of exposed ports.\n\nThis includes ports already exposed by the image, even if not\nexplicitly added with dagger."
     @spec exposed_ports(t()) :: {:ok, [Dagger.Port.t()]} | {:error, term()}
     def exposed_ports(%__MODULE__{} = container) do
       selection = select(container.selection, "exposedPorts")
@@ -202,15 +225,6 @@ defmodule Dagger.Container do
       selection = select(container.selection, "from")
       selection = arg(selection, "address", address)
       %Dagger.Container{selection: selection, client: container.client}
-    end
-  )
-
-  (
-    @doc "Retrieves a hostname which can be used by clients to reach this container.\n\nCurrently experimental; set _EXPERIMENTAL_DAGGER_SERVICES_DNS=0 to disable."
-    @spec hostname(t()) :: {:ok, Dagger.String.t()} | {:error, term()}
-    def hostname(%__MODULE__{} = container) do
-      selection = select(container.selection, "hostname")
-      execute(selection, container.client)
     end
   )
 
@@ -366,6 +380,15 @@ defmodule Dagger.Container do
     def rootfs(%__MODULE__{} = container) do
       selection = select(container.selection, "rootfs")
       %Dagger.Directory{selection: selection, client: container.client}
+    end
+  )
+
+  (
+    @doc "Return a websocket endpoint that, if connected to, will start the container with a TTY streamed\nover the websocket.\n\nPrimarily intended for internal use with the dagger CLI."
+    @spec shell_endpoint(t()) :: {:ok, Dagger.String.t()} | {:error, term()}
+    def shell_endpoint(%__MODULE__{} = container) do
+      selection = select(container.selection, "shellEndpoint")
+      execute(selection, container.client)
     end
   )
 
@@ -548,7 +571,7 @@ defmodule Dagger.Container do
   )
 
   (
-    @doc "Expose a network port.\n\nExposed ports serve two purposes:\n  - For health checks and introspection, when running services\n  - For setting the EXPOSE OCI field when publishing the container\n\nCurrently experimental; set _EXPERIMENTAL_DAGGER_SERVICES_DNS=0 to disable.\n\n## Required Arguments\n\n* `port` - Port number to expose\n\n## Optional Arguments\n\n* `protocol` - Transport layer network protocol\n* `description` - Optional port description"
+    @doc "Expose a network port.\n\nExposed ports serve two purposes:\n  - For health checks and introspection, when running services\n  - For setting the EXPOSE OCI field when publishing the container\n\n## Required Arguments\n\n* `port` - Port number to expose\n\n## Optional Arguments\n\n* `protocol` - Transport layer network protocol\n* `description` - Optional port description"
     @spec with_exposed_port(t(), Dagger.Int.t(), keyword()) :: Dagger.Container.t()
     def with_exposed_port(%__MODULE__{} = container, port, optional_args \\ []) do
       selection = select(container.selection, "withExposedPort")
@@ -624,7 +647,7 @@ defmodule Dagger.Container do
 
   (
     @doc "Retrieves this container plus a cache volume mounted at the given path.\n\n## Required Arguments\n\n* `path` - Location of the cache directory (e.g., \"/cache/node_modules\").\n* `cache` - Identifier of the cache volume to mount.\n\n## Optional Arguments\n\n* `source` - Identifier of the directory to use as the cache volume's root.\n* `sharing` - Sharing mode of the cache volume.\n* `owner` - A user:group to set for the mounted cache directory.\n\nNote that this changes the ownership of the specified mount along with the\ninitial filesystem provided by source (if any). It does not have any effect\nif/when the cache has already been created.\n\nThe user and group can either be an ID (1000:1000) or a name (foo:bar).\n\nIf the group is omitted, it defaults to the same as the user."
-    @spec with_mounted_cache(t(), Dagger.String.t(), Dagger.Cache.t(), keyword()) ::
+    @spec with_mounted_cache(t(), Dagger.String.t(), Dagger.CacheVolume.t(), keyword()) ::
             Dagger.Container.t()
     def with_mounted_cache(%__MODULE__{} = container, path, cache, optional_args \\ []) do
       selection = select(container.selection, "withMountedCache")
@@ -832,18 +855,12 @@ defmodule Dagger.Container do
   )
 
   (
-    @doc "Establish a runtime dependency on a service.\n\nThe service will be started automatically when needed and detached when it is\nno longer needed, executing the default command if none is set.\n\nThe service will be reachable from the container via the provided hostname alias.\n\nThe service dependency will also convey to any files or directories produced by the container.\n\nCurrently experimental; set _EXPERIMENTAL_DAGGER_SERVICES_DNS=0 to disable.\n\n## Required Arguments\n\n* `alias` - A name that can be used to reach the service from the container\n* `service` - Identifier of the service container"
-    @spec with_service_binding(t(), Dagger.String.t(), Dagger.Container.t()) ::
-            Dagger.Container.t()
+    @doc "Establish a runtime dependency on a service.\n\nThe service will be started automatically when needed and detached when it is\nno longer needed, executing the default command if none is set.\n\nThe service will be reachable from the container via the provided hostname alias.\n\nThe service dependency will also convey to any files or directories produced by the container.\n\n## Required Arguments\n\n* `alias` - A name that can be used to reach the service from the container\n* `service` - Identifier of the service container"
+    @spec with_service_binding(t(), Dagger.String.t(), Dagger.Service.t()) :: Dagger.Container.t()
     def with_service_binding(%__MODULE__{} = container, alias, service) do
       selection = select(container.selection, "withServiceBinding")
       selection = arg(selection, "alias", alias)
-
-      (
-        {:ok, id} = Dagger.Container.id(service)
-        selection = arg(selection, "service", id)
-      )
-
+      selection = arg(selection, "service", service)
       %Dagger.Container{selection: selection, client: container.client}
     end
   )
@@ -903,7 +920,7 @@ defmodule Dagger.Container do
   )
 
   (
-    @doc "Unexpose a previously exposed port.\n\nCurrently experimental; set _EXPERIMENTAL_DAGGER_SERVICES_DNS=0 to disable.\n\n## Required Arguments\n\n* `port` - Port number to unexpose\n\n## Optional Arguments\n\n* `protocol` - Port protocol to unexpose"
+    @doc "Unexpose a previously exposed port.\n\n## Required Arguments\n\n* `port` - Port number to unexpose\n\n## Optional Arguments\n\n* `protocol` - Port protocol to unexpose"
     @spec without_exposed_port(t(), Dagger.Int.t(), keyword()) :: Dagger.Container.t()
     def without_exposed_port(%__MODULE__{} = container, port, optional_args \\ []) do
       selection = select(container.selection, "withoutExposedPort")

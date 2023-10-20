@@ -2,21 +2,24 @@ package querybuilder
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
 
-type customStringType string
+type enumType string
+
+func (c enumType) IsEnum() {}
 
 func TestMarshalGQL(t *testing.T) {
 	var (
 		str         = "hello world"
 		unicode     = "∆?–∂∂√˛viÙ˜Ÿ¿GÆÓ∂Ó˘◊ñ" //nolint:stylecheck
 		strNullPtr  *string
-		strPtrSlice                  = []*string{&str}
-		customStr   customStringType = "test"
+		strPtrSlice          = []*string{&str}
+		enumVal     enumType = "test"
 	)
 
 	testCases := []struct {
@@ -69,7 +72,7 @@ func TestMarshalGQL(t *testing.T) {
 			expect: `["hello world"]`,
 		},
 		{
-			v:      customStr,
+			v:      enumVal,
 			expect: "test",
 		},
 	}
@@ -113,6 +116,14 @@ func (m *customMarshaller) XXX_GraphQLIDType() string { return "idTypeTest" }
 func (m *customMarshaller) XXX_GraphQLID(context.Context) (string, error) {
 	m.count++
 	return m.v, nil
+}
+
+// nolint
+func (m *customMarshaller) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		v     string
+		count int
+	}{m.v, m.count})
 }
 
 var _ GraphQLMarshaller = &customMarshaller{}

@@ -2,14 +2,10 @@ package core
 
 import (
 	"bytes"
-	"context"
 	_ "embed"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
-	"net"
 	"net/http"
 	"os"
 	"path"
@@ -1411,7 +1407,7 @@ func TestContainerWithMountedCache(t *testing.T) {
 		}
 	}{}
 
-	query := `query Test($cache: CacheID!, $rand: String!) {
+	query := `query Test($cache: CacheVolumeID!, $rand: String!) {
 			container {
 				from(address: "` + alpineImage + `") {
 					withEnvVariable(name: "RAND", value: $rand) {
@@ -1485,7 +1481,7 @@ func TestContainerWithMountedCacheFromDirectory(t *testing.T) {
 		}
 	}{}
 
-	query := `query Test($cache: CacheID!, $rand: String!, $init: DirectoryID!) {
+	query := `query Test($cache: CacheVolumeID!, $rand: String!, $init: DirectoryID!) {
 			container {
 				from(address: "` + alpineImage + `") {
 					withEnvVariable(name: "RAND", value: $rand) {
@@ -1980,7 +1976,7 @@ func TestContainerDirectoryErrors(t *testing.T) {
 
 	cacheID := newCache(t)
 	err = testutil.Query(
-		`query Test($cache: CacheID!) {
+		`query Test($cache: CacheVolumeID!) {
 			container {
 				from(address: "`+alpineImage+`") {
 					withMountedCache(path: "/mnt/cache", cache: $cache) {
@@ -2215,7 +2211,7 @@ func TestContainerFileErrors(t *testing.T) {
 
 	cacheID := newCache(t)
 	err = testutil.Query(
-		`query Test($cache: CacheID!) {
+		`query Test($cache: CacheVolumeID!) {
 			container {
 				from(address: "`+alpineImage+`") {
 					withMountedCache(path: "/mnt/cache", cache: $cache) {
@@ -2359,7 +2355,7 @@ func TestContainerRelativePaths(t *testing.T) {
 
 	cacheID := newCache(t)
 	err = testutil.Query(
-		`query Test($id: DirectoryID!, $cache: CacheID!) {
+		`query Test($id: DirectoryID!, $cache: CacheVolumeID!) {
 			container {
 				from(address: "`+alpineImage+`") {
 					withExec(args: ["mkdir", "-p", "/mnt/sub"]) {
@@ -2571,37 +2567,48 @@ func TestContainerExport(t *testing.T) {
 		WithEntrypoint(entrypoint)
 
 	t.Run("to absolute dir", func(t *testing.T) {
-		imagePath := filepath.Join(dest, "image.tar")
+		for _, useAsTarball := range []bool{true, false} {
+			t.Run(fmt.Sprintf("useAsTarball=%t", useAsTarball), func(t *testing.T) {
+				imagePath := filepath.Join(dest, "image.tar")
 
-		ok, err := ctr.Export(ctx, imagePath)
-		require.NoError(t, err)
-		require.True(t, ok)
+				if useAsTarball {
+					tarFile := ctr.AsTarball()
+					ok, err := tarFile.Export(ctx, imagePath)
+					require.NoError(t, err)
+					require.True(t, ok)
+				} else {
+					ok, err := ctr.Export(ctx, imagePath)
+					require.NoError(t, err)
+					require.True(t, ok)
+				}
 
-		stat, err := os.Stat(imagePath)
-		require.NoError(t, err)
-		require.NotZero(t, stat.Size())
-		require.EqualValues(t, 0o600, stat.Mode().Perm())
+				stat, err := os.Stat(imagePath)
+				require.NoError(t, err)
+				require.NotZero(t, stat.Size())
+				require.EqualValues(t, 0o600, stat.Mode().Perm())
 
-		entries := tarEntries(t, imagePath)
-		require.Contains(t, entries, "oci-layout")
-		require.Contains(t, entries, "index.json")
+				entries := tarEntries(t, imagePath)
+				require.Contains(t, entries, "oci-layout")
+				require.Contains(t, entries, "index.json")
 
-		// a single-platform image includes a manifest.json, making it
-		// compatible with docker load
-		require.Contains(t, entries, "manifest.json")
+				// a single-platform image includes a manifest.json, making it
+				// compatible with docker load
+				require.Contains(t, entries, "manifest.json")
 
-		dockerManifestBytes := readTarFile(t, imagePath, "manifest.json")
-		// NOTE: this is what buildkit integ tests do, use a one-off struct rather than actual defined type
-		var dockerManifest []struct {
-			Config string
+				dockerManifestBytes := readTarFile(t, imagePath, "manifest.json")
+				// NOTE: this is what buildkit integ tests do, use a one-off struct rather than actual defined type
+				var dockerManifest []struct {
+					Config string
+				}
+				require.NoError(t, json.Unmarshal(dockerManifestBytes, &dockerManifest))
+				require.Len(t, dockerManifest, 1)
+				configPath := dockerManifest[0].Config
+				configBytes := readTarFile(t, imagePath, configPath)
+				var img ocispecs.Image
+				require.NoError(t, json.Unmarshal(configBytes, &img))
+				require.Equal(t, entrypoint, img.Config.Entrypoint)
+			})
 		}
-		require.NoError(t, json.Unmarshal(dockerManifestBytes, &dockerManifest))
-		require.Len(t, dockerManifest, 1)
-		configPath := dockerManifest[0].Config
-		configBytes := readTarFile(t, imagePath, configPath)
-		var img ocispecs.Image
-		require.NoError(t, json.Unmarshal(configBytes, &img))
-		require.Equal(t, entrypoint, img.Config.Entrypoint)
 	})
 
 	t.Run("to workdir", func(t *testing.T) {
@@ -2636,6 +2643,21 @@ func TestContainerExport(t *testing.T) {
 		require.Error(t, err)
 		require.False(t, ok)
 	})
+}
+
+// NOTE: more test coverage of Container.AsTarball are in TestContainerExport and TestContainerMultiPlatformExport
+func TestContainerAsTarball(t *testing.T) {
+	t.Parallel()
+
+	c, ctx := connect(t)
+	ctr := c.Container().From(alpineImage)
+	output, err := ctr.
+		WithMountedFile("/foo.tar", ctr.AsTarball()).
+		WithExec([]string{"apk", "add", "file"}).
+		WithExec([]string{"file", "/foo.tar"}).
+		Stdout(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "/foo.tar: POSIX tar archive\n", output)
 }
 
 func TestContainerImport(t *testing.T) {
@@ -2711,63 +2733,93 @@ func TestContainerImport(t *testing.T) {
 	})
 }
 
-func TestContainerMultiPlatformExport(t *testing.T) {
+func TestContainerFromIDPlatform(t *testing.T) {
 	c, ctx := connect(t)
 
-	variants := make([]*dagger.Container, 0, len(platformToUname))
-	for platform, uname := range platformToUname {
-		ctr := c.Container(dagger.ContainerOpts{Platform: platform}).
-			From(alpineImage).
-			WithExec([]string{"uname", "-m"}).
-			WithDefaultArgs(dagger.ContainerWithDefaultArgsOpts{}).
-			WithEntrypoint([]string{"echo", uname})
-		variants = append(variants, ctr)
-	}
+	var desiredPlatform dagger.Platform = "linux/arm64"
 
-	dest := filepath.Join(t.TempDir(), "image.tar")
-
-	ok, err := c.Container().Export(ctx, dest, dagger.ContainerExportOpts{
-		PlatformVariants: variants,
-	})
+	id, err := c.Container(dagger.ContainerOpts{
+		Platform: desiredPlatform,
+	}).From(alpineImage).ID(ctx)
 	require.NoError(t, err)
-	require.True(t, ok)
 
-	entries := tarEntries(t, dest)
-	require.Contains(t, entries, "oci-layout")
-	// multi-platform images don't contain a manifest.json
-	require.NotContains(t, entries, "manifest.json")
+	platform, err := c.Container(dagger.ContainerOpts{
+		ID: id,
+	}).Platform(ctx)
+	require.NoError(t, err)
+	require.Equal(t, desiredPlatform, platform)
+}
 
-	indexBytes := readTarFile(t, dest, "index.json")
-	var index ocispecs.Index
-	require.NoError(t, json.Unmarshal(indexBytes, &index))
-	// index is nested (search "nested index" in spec here):
-	// https://github.com/opencontainers/image-spec/blob/main/image-index.md
-	nestedIndexDigest := index.Manifests[0].Digest
-	indexBytes = readTarFile(t, dest, "blobs/sha256/"+nestedIndexDigest.Encoded())
-	index = ocispecs.Index{}
-	require.NoError(t, json.Unmarshal(indexBytes, &index))
+func TestContainerMultiPlatformExport(t *testing.T) {
+	for _, useAsTarball := range []bool{true, false} {
+		t.Run(fmt.Sprintf("useAsTarball=%t", useAsTarball), func(t *testing.T) {
+			c, ctx := connect(t)
 
-	// make sure all the platforms we expected are there
-	exportedPlatforms := make(map[string]struct{})
-	for _, desc := range index.Manifests {
-		require.NotNil(t, desc.Platform)
-		platformStr := platforms.Format(*desc.Platform)
-		exportedPlatforms[platformStr] = struct{}{}
+			variants := make([]*dagger.Container, 0, len(platformToUname))
+			for platform, uname := range platformToUname {
+				ctr := c.Container(dagger.ContainerOpts{Platform: platform}).
+					From(alpineImage).
+					WithExec([]string{"uname", "-m"}).
+					WithDefaultArgs(dagger.ContainerWithDefaultArgsOpts{}).
+					WithEntrypoint([]string{"echo", uname})
+				variants = append(variants, ctr)
+			}
 
-		manifestDigest := desc.Digest
-		manifestBytes := readTarFile(t, dest, "blobs/sha256/"+manifestDigest.Encoded())
-		var manifest ocispecs.Manifest
-		require.NoError(t, json.Unmarshal(manifestBytes, &manifest))
-		configDigest := manifest.Config.Digest
-		configBytes := readTarFile(t, dest, "blobs/sha256/"+configDigest.Encoded())
-		var config ocispecs.Image
-		require.NoError(t, json.Unmarshal(configBytes, &config))
-		require.Equal(t, []string{"echo", platformToUname[dagger.Platform(platformStr)]}, config.Config.Entrypoint)
+			dest := filepath.Join(t.TempDir(), "image.tar")
+
+			if useAsTarball {
+				tarFile := c.Container().AsTarball(dagger.ContainerAsTarballOpts{
+					PlatformVariants: variants,
+				})
+				ok, err := tarFile.Export(ctx, dest)
+				require.NoError(t, err)
+				require.True(t, ok)
+			} else {
+				ok, err := c.Container().Export(ctx, dest, dagger.ContainerExportOpts{
+					PlatformVariants: variants,
+				})
+				require.NoError(t, err)
+				require.True(t, ok)
+			}
+
+			entries := tarEntries(t, dest)
+			require.Contains(t, entries, "oci-layout")
+			// multi-platform images don't contain a manifest.json
+			require.NotContains(t, entries, "manifest.json")
+
+			indexBytes := readTarFile(t, dest, "index.json")
+			var index ocispecs.Index
+			require.NoError(t, json.Unmarshal(indexBytes, &index))
+			// index is nested (search "nested index" in spec here):
+			// https://github.com/opencontainers/image-spec/blob/main/image-index.md
+			nestedIndexDigest := index.Manifests[0].Digest
+			indexBytes = readTarFile(t, dest, "blobs/sha256/"+nestedIndexDigest.Encoded())
+			index = ocispecs.Index{}
+			require.NoError(t, json.Unmarshal(indexBytes, &index))
+
+			// make sure all the platforms we expected are there
+			exportedPlatforms := make(map[string]struct{})
+			for _, desc := range index.Manifests {
+				require.NotNil(t, desc.Platform)
+				platformStr := platforms.Format(*desc.Platform)
+				exportedPlatforms[platformStr] = struct{}{}
+
+				manifestDigest := desc.Digest
+				manifestBytes := readTarFile(t, dest, "blobs/sha256/"+manifestDigest.Encoded())
+				var manifest ocispecs.Manifest
+				require.NoError(t, json.Unmarshal(manifestBytes, &manifest))
+				configDigest := manifest.Config.Digest
+				configBytes := readTarFile(t, dest, "blobs/sha256/"+configDigest.Encoded())
+				var config ocispecs.Image
+				require.NoError(t, json.Unmarshal(configBytes, &config))
+				require.Equal(t, []string{"echo", platformToUname[dagger.Platform(platformStr)]}, config.Config.Entrypoint)
+			}
+			for platform := range platformToUname {
+				delete(exportedPlatforms, string(platform))
+			}
+			require.Empty(t, exportedPlatforms)
+		})
 	}
-	for platform := range platformToUname {
-		delete(exportedPlatforms, string(platform))
-	}
-	require.Empty(t, exportedPlatforms)
 }
 
 // Multiplatform publish is also tested in more complicated scenarios in platform_test.go
@@ -2856,84 +2908,6 @@ func TestContainerWithDirectoryToMount(t *testing.T) {
 		"/mnt/sub-dir/copied-dir",
 		"/mnt/sub-dir/copied-dir/copied-file",
 	}, strings.Split(strings.Trim(contents, "\n"), "\n"))
-}
-
-//go:embed testdata/socket-echo.go
-var echoSocketSrc string
-
-func TestContainerWithUnixSocket(t *testing.T) {
-	c, ctx := connect(t)
-
-	tmp := t.TempDir()
-	sock := filepath.Join(tmp, "test.sock")
-
-	l, err := net.Listen("unix", sock)
-	require.NoError(t, err)
-
-	defer l.Close()
-
-	go func() {
-		for {
-			c, err := l.Accept()
-			if err != nil {
-				if !errors.Is(err, net.ErrClosed) {
-					t.Logf("accept: %s", err)
-					panic(err)
-				}
-				return
-			}
-
-			n, err := io.Copy(c, c)
-			if err != nil {
-				t.Logf("hello: %s", err)
-				panic(err)
-			}
-
-			t.Logf("copied %d bytes", n)
-
-			err = c.Close()
-			if err != nil {
-				t.Logf("close: %s", err)
-				panic(err)
-			}
-		}
-	}()
-
-	echo := c.Directory().WithNewFile("main.go", echoSocketSrc).File("main.go")
-
-	ctr := c.Container().
-		From("golang:1.20.0-alpine").
-		WithMountedFile("/src/main.go", echo).
-		WithUnixSocket("/tmp/test.sock", c.Host().UnixSocket(sock)).
-		WithExec([]string{"go", "run", "/src/main.go", "/tmp/test.sock", "hello"})
-
-	stdout, err := ctr.Stdout(ctx)
-	require.NoError(t, err)
-	require.Equal(t, "hello\n", stdout)
-
-	t.Run("socket can be removed", func(t *testing.T) {
-		without := ctr.WithoutUnixSocket("/tmp/test.sock").
-			WithExec([]string{"ls", "/tmp"})
-
-		stdout, err = without.Stdout(ctx)
-		require.NoError(t, err)
-		require.Empty(t, stdout)
-	})
-
-	t.Run("replaces existing socket at same path", func(t *testing.T) {
-		repeated := ctr.WithUnixSocket("/tmp/test.sock", c.Host().UnixSocket(sock))
-
-		stdout, err := repeated.Stdout(ctx)
-		require.NoError(t, err)
-		require.Equal(t, "hello\n", stdout)
-
-		without := repeated.WithoutUnixSocket("/tmp/test.sock").
-			WithExec([]string{"ls", "/tmp"})
-
-		stdout, err = without.Stdout(ctx)
-		require.NoError(t, err)
-		require.Empty(t, stdout)
-	})
 }
 
 func TestContainerExecError(t *testing.T) {
@@ -3206,9 +3180,9 @@ func TestContainerInsecureRootCapabilitesWithService(t *testing.T) {
 			"--tls=false",
 		}, dagger.ContainerWithExecOpts{
 			InsecureRootCapabilities: true,
-		})
+		}).AsService()
 
-	dockerHost, err := dockerd.Endpoint(ctx, dagger.ContainerEndpointOpts{
+	dockerHost, err := dockerd.Endpoint(ctx, dagger.ServiceEndpointOpts{
 		Scheme: "tcp",
 	})
 	require.NoError(t, err)
@@ -3503,96 +3477,6 @@ func TestContainerWithMountedSecretOwner(t *testing.T) {
 			Owner: owner,
 		})
 	})
-}
-
-func TestContainerWithUnixSocketOwner(t *testing.T) {
-	c, ctx := connect(t)
-
-	tmp := t.TempDir()
-	sock := filepath.Join(tmp, "test.sock")
-
-	l, err := net.Listen("unix", sock)
-	require.NoError(t, err)
-
-	defer l.Close()
-
-	socket := c.Host().UnixSocket(sock)
-
-	testOwnership(ctx, t, c, func(ctr *dagger.Container, name string, owner string) *dagger.Container {
-		return ctr.WithUnixSocket(name, socket, dagger.ContainerWithUnixSocketOpts{
-			Owner: owner,
-		})
-	})
-}
-
-func testOwnership(
-	ctx context.Context,
-	t *testing.T,
-	c *dagger.Client,
-	addContent func(ctr *dagger.Container, name, owner string) *dagger.Container,
-) {
-	t.Parallel()
-
-	ctr := c.Container().From(alpineImage).
-		WithExec([]string{"adduser", "-D", "inherituser"}).
-		WithExec([]string{"adduser", "-u", "1234", "-D", "auser"}).
-		WithExec([]string{"addgroup", "-g", "4321", "agroup"}).
-		WithUser("inherituser").
-		WithWorkdir("/data")
-
-	type example struct {
-		name   string
-		owner  string
-		output string
-	}
-
-	for _, example := range []example{
-		{name: "userid", owner: "1234", output: "auser auser"},
-		{name: "userid-twice", owner: "1234:1234", output: "auser auser"},
-		{name: "username", owner: "auser", output: "auser auser"},
-		{name: "username-twice", owner: "auser:auser", output: "auser auser"},
-		{name: "ids", owner: "1234:4321", output: "auser agroup"},
-		{name: "username-gid", owner: "auser:4321", output: "auser agroup"},
-		{name: "uid-groupname", owner: "1234:agroup", output: "auser agroup"},
-		{name: "names", owner: "auser:agroup", output: "auser agroup"},
-
-		// NB: inheriting the user/group from the container was implemented, but we
-		// decided to back out for a few reasons:
-		//
-		// 1. performance: right now chowning has to be a separate Copy operation,
-		//    which currently literally copies the relevant files even for a chown,
-		//    which seems prohibitively expensive as a default. maybe with metacopy
-		//    support in Buildkit this would become more feasible.
-		// 2. bumping timestamps: chown operations are also technically writes, so
-		//    we would be bumping timestamps all over the place and making builds
-		//    non-reproducible. this has an especially unfortunate interaction with
-		//    WithTimestamps where if you were to pass the timestamped values to
-		//    another container you would immediately lose those timestamps.
-		// 3. no opt-out: what if the user actually _wants_ to keep the permissions
-		//    as they are? we would need to add another API for this. given all of
-		//    the above, making it opt-in seems obvious.
-		{name: "no-inherit", owner: "", output: "root root"},
-	} {
-		example := example
-		t.Run(example.name, func(t *testing.T) {
-			withOwner := addContent(ctr, example.name, example.owner)
-			output, err := withOwner.
-				WithUser("root"). // go back to root so we can see 0400 files
-				WithExec([]string{
-					"sh", "-exc",
-					"find * | xargs stat -c '%U %G'", // stat recursively
-				}).
-				Stdout(ctx)
-			require.NoError(t, err)
-			for _, line := range strings.Split(output, "\n") {
-				if line == "" {
-					continue
-				}
-
-				require.Equal(t, example.output, line)
-			}
-		})
-	}
 }
 
 func TestContainerParallelMutation(t *testing.T) {
@@ -3924,9 +3808,10 @@ func TestContainerImageLoadCompatibility(t *testing.T) {
 				"--tls=false",
 			}, dagger.ContainerWithExecOpts{
 				InsecureRootCapabilities: true,
-			})
+			}).
+			AsService()
 
-		dockerHost, err := dockerd.Endpoint(ctx, dagger.ContainerEndpointOpts{
+		dockerHost, err := dockerd.Endpoint(ctx, dagger.ServiceEndpointOpts{
 			Scheme: "tcp",
 		})
 		require.NoError(t, err)

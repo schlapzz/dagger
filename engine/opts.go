@@ -9,6 +9,7 @@ import (
 
 	"github.com/dagger/dagger/core/pipeline"
 	controlapi "github.com/moby/buildkit/api/services/control"
+	"github.com/opencontainers/go-digest"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -36,7 +37,7 @@ type ClientMetadata struct {
 	ClientSecretToken string `json:"client_secret_token"`
 
 	// ServerID is the id of the server that a client and any of its nested
-	// environment clients connect to
+	// module clients connect to
 	ServerID string `json:"server_id"`
 
 	// If RegisterClient is true, then a call to Session will initialize the
@@ -60,8 +61,14 @@ type ClientMetadata struct {
 	// parent of the parent, and so on.
 	ParentClientIDs []string `json:"parent_client_ids"`
 
+	// TODO: doc if stays in
+	ModuleDigest digest.Digest `json:"module_digest"`
+
+	// TODO: doc if stays in
+	FunctionContextDigest digest.Digest `json:"function_context_digest"`
+
 	// Import configuration for Buildkit's remote cache
-	UpstreamCacheConfig []*controlapi.CacheOptionsEntry
+	UpstreamCacheImportConfig []*controlapi.CacheOptionsEntry
 }
 
 // ClientIDs returns the ClientID followed by ParentClientIDs.

@@ -3,8 +3,11 @@ package core
 import (
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
+	"strings"
 
 	"github.com/dagger/dagger/core/resourceid"
+	"github.com/opencontainers/go-digest"
 	"github.com/pkg/errors"
 )
 
@@ -13,7 +16,7 @@ type CacheVolume struct {
 	Keys []string `json:"keys"`
 }
 
-var ErrInvalidCacheID = errors.New("invalid cache ID; create one using cacheVolume")
+var ErrInvalidCacheVolumeID = errors.New("invalid cache ID; create one using cacheVolume")
 
 func NewCache(keys ...string) *CacheVolume {
 	return &CacheVolume{Keys: keys}
@@ -25,21 +28,8 @@ func (cache *CacheVolume) Clone() *CacheVolume {
 	return &cp
 }
 
-// CacheID is an arbitrary string typically derived from a set of token
-// strings acting as the cache's "key" or "scope".
-type CacheID string
-
-func (id CacheID) ToCacheVolume() (*CacheVolume, error) {
-	var cache CacheVolume
-	if err := resourceid.Decode(&cache, id); err != nil {
-		return nil, ErrInvalidCacheID
-	}
-
-	if len(cache.Keys) == 0 {
-		return nil, ErrInvalidCacheID
-	}
-
-	return &cache, nil
+func (cache *CacheVolume) Digest() (digest.Digest, error) {
+	return stableDigest(cache)
 }
 
 // Sum returns a checksum of the cache tokens suitable for use as a cache key.
@@ -52,8 +42,8 @@ func (cache *CacheVolume) Sum() string {
 	return base64.StdEncoding.EncodeToString(hash.Sum(nil))
 }
 
-func (cache *CacheVolume) ID() (CacheID, error) {
-	return resourceid.Encode[CacheID](cache)
+func (cache *CacheVolume) ID() (CacheVolumeID, error) {
+	return resourceid.Encode(cache)
 }
 
 // CacheSharingMode is a string deriving from CacheSharingMode enum
@@ -65,6 +55,29 @@ const (
 	CacheSharingModePrivate CacheSharingMode = "PRIVATE"
 	CacheSharingModeLocked  CacheSharingMode = "LOCKED"
 )
+
+// CacheSharingMode marshals to its lowercased value.
+//
+// NB: as far as I can recall this is purely for ~*aesthetic*~. GraphQL consts
+// are so shouty!
+func (mode CacheSharingMode) MarshalJSON() ([]byte, error) {
+	return json.Marshal(strings.ToLower(string(mode)))
+}
+
+// CacheSharingMode marshals to its lowercased value.
+//
+// NB: as far as I can recall this is purely for ~*aesthetic*~. GraphQL consts
+// are so shouty!
+func (mode *CacheSharingMode) UnmarshalJSON(payload []byte) error {
+	var str string
+	if err := json.Unmarshal(payload, &str); err != nil {
+		return err
+	}
+
+	*mode = CacheSharingMode(strings.ToUpper(str))
+
+	return nil
+}
 
 func (cache *CacheVolume) WithKey(key string) *CacheVolume {
 	cache = cache.Clone()

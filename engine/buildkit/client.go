@@ -2,17 +2,23 @@ package buildkit
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/dagger/dagger/auth"
+	"github.com/dagger/dagger/engine"
+	"github.com/dagger/dagger/engine/session"
 	bkcache "github.com/moby/buildkit/cache"
 	bkcacheconfig "github.com/moby/buildkit/cache/config"
 	"github.com/moby/buildkit/cache/remotecache"
 	bkclient "github.com/moby/buildkit/client"
 	"github.com/moby/buildkit/client/llb"
+	"github.com/moby/buildkit/executor/oci"
 	bkfrontend "github.com/moby/buildkit/frontend"
 	bkgw "github.com/moby/buildkit/frontend/gateway/client"
 	bkcontainer "github.com/moby/buildkit/frontend/gateway/container"
@@ -45,11 +51,13 @@ type Opts struct {
 	AuthProvider          *auth.RegistryAuthProvider
 	PrivilegedExecEnabled bool
 	UpstreamCacheImports  []bkgw.CacheOptionsEntry
+	ProgSockPath          string
 	// MainClientCaller is the caller who initialized the server associated with this
 	// client. It is special in that when it shuts down, the client will be closed and
 	// that registry auth and sockets are currently only ever sourced from this caller,
 	// not any nested clients (may change in future).
 	MainClientCaller bksession.Caller
+	DNSConfig        *oci.DNSConfig
 }
 
 type ResolveCacheExporterFunc func(ctx context.Context, g bksession.Group) (remotecache.Exporter, error)
@@ -68,6 +76,8 @@ type Client struct {
 	refsMu       sync.Mutex
 	containers   map[bkgw.Container]struct{}
 	containersMu sync.Mutex
+
+	dialer *net.Dialer
 
 	closeCtx context.Context
 	cancel   context.CancelFunc
@@ -106,6 +116,32 @@ func NewClient(ctx context.Context, opts Opts) (*Client, error) {
 
 	client.llbBridge = client.LLBSolver.Bridge(client.job)
 	client.llbBridge = recordingGateway{client.llbBridge}
+
+	client.dialer = &net.Dialer{}
+
+	if opts.DNSConfig != nil {
+		client.dialer.Resolver = &net.Resolver{
+			PreferGo: true,
+			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+				if len(opts.DNSConfig.Nameservers) == 0 {
+					return nil, errors.New("no nameservers configured")
+				}
+
+				var errs []error
+				for _, ns := range opts.DNSConfig.Nameservers {
+					conn, err := client.dialer.DialContext(ctx, network, net.JoinHostPort(ns, "53"))
+					if err != nil {
+						errs = append(errs, err)
+						continue
+					}
+
+					return conn, nil
+				}
+
+				return nil, errors.Join(errs...)
+			},
+		}
+	}
 
 	return client, nil
 }
@@ -189,6 +225,50 @@ func (c *Client) Solve(ctx context.Context, req bkgw.SolveRequest) (_ *Result, r
 
 	// include upstream cache imports, if any
 	req.CacheImports = c.UpstreamCacheImports
+
+	// include exec metadata that isn't included in the cache key
+	if req.Definition != nil && req.Definition.Def != nil {
+		clientMetadata, err := engine.ClientMetadataFromContext(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		dag, err := DefToDAG(req.Definition)
+		if err != nil {
+			return nil, err
+		}
+		if err := dag.Walk(func(dag *OpDAG) error {
+			execOp, ok := dag.AsExec()
+			if !ok {
+				return nil
+			}
+			if execOp.Meta == nil {
+				execOp.Meta = &bksolverpb.Meta{}
+			}
+			if execOp.Meta.ProxyEnv == nil {
+				execOp.Meta.ProxyEnv = &bksolverpb.ProxyEnv{}
+			}
+			var err error
+			execOp.Meta.ProxyEnv.FtpProxy, err = ContainerExecUncachedMetadata{
+				ParentClientIDs:       clientMetadata.ClientIDs(),
+				ServerID:              clientMetadata.ServerID,
+				ProgSockPath:          c.ProgSockPath,
+				ModuleDigest:          clientMetadata.ModuleDigest,
+				FunctionContextDigest: clientMetadata.FunctionContextDigest,
+			}.ToPBFtpProxyVal()
+			if err != nil {
+				return err
+			}
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+		newDef, err := dag.Marshal()
+		if err != nil {
+			return nil, err
+		}
+		req.Definition = newDef
+	}
 
 	llbRes, err := c.llbBridge.Solve(ctx, req, c.ID())
 	if err != nil {
@@ -458,10 +538,177 @@ func withDescHandlerCacheOpts(ctx context.Context, ref bkcache.ImmutableRef) con
 	})
 }
 
+func (c *Client) ListenHostToContainer(
+	ctx context.Context,
+	hostListenAddr, proto, upstream string,
+) (*session.ListenResponse, func() error, error) {
+	ctx, cancel, err := c.withClientCloseCancel(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	clientMetadata, err := engine.ClientMetadataFromContext(ctx)
+	if err != nil {
+		cancel()
+		return nil, nil, fmt.Errorf("failed to get requester session ID: %s", err)
+	}
+
+	clientCaller, err := c.SessionManager.Get(ctx, clientMetadata.ClientID, false)
+	if err != nil {
+		cancel()
+		return nil, nil, fmt.Errorf("failed to get requester session: %s", err)
+	}
+
+	conn := clientCaller.Conn()
+
+	tunnelClient := session.NewTunnelListenerClient(conn)
+
+	listener, err := tunnelClient.Listen(ctx)
+	if err != nil {
+		cancel()
+		return nil, nil, fmt.Errorf("failed to listen: %s", err)
+	}
+
+	err = listener.Send(&session.ListenRequest{
+		Addr:     hostListenAddr,
+		Protocol: proto,
+	})
+	if err != nil {
+		cancel()
+		return nil, nil, fmt.Errorf("failed to send listen request: %s", err)
+	}
+
+	listenRes, err := listener.Recv()
+	if err != nil {
+		cancel()
+		return nil, nil, fmt.Errorf("failed to receive listen response: %s", err)
+	}
+
+	conns := map[string]net.Conn{}
+	connsL := &sync.Mutex{}
+	sendL := &sync.Mutex{}
+
+	wg := new(sync.WaitGroup)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			res, err := listener.Recv()
+			if err != nil {
+				bklog.G(ctx).Warnf("listener recv err: %s", err)
+				return
+			}
+
+			connID := res.GetConnId()
+			if connID == "" {
+				continue
+			}
+
+			connsL.Lock()
+			conn, found := conns[connID]
+			connsL.Unlock()
+
+			if !found {
+				conn, err := c.dialer.Dial(proto, upstream)
+				if err != nil {
+					bklog.G(ctx).Warnf("failed to dial %s %s: %s", proto, upstream, err)
+					return
+				}
+
+				connsL.Lock()
+				conns[connID] = conn
+				connsL.Unlock()
+
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+
+					data := make([]byte, 32*1024)
+					for {
+						n, err := conn.Read(data)
+						if err != nil {
+							return
+						}
+
+						sendL.Lock()
+						err = listener.Send(&session.ListenRequest{
+							ConnId: connID,
+							Data:   data[:n],
+						})
+						sendL.Unlock()
+						if err != nil {
+							return
+						}
+					}
+				}()
+			}
+
+			if res.Data != nil {
+				_, err = conn.Write(res.Data)
+				if err != nil {
+					return
+				}
+			}
+		}
+	}()
+
+	return listenRes, func() error {
+		defer cancel()
+		sendL.Lock()
+		err := listener.CloseSend()
+		sendL.Unlock()
+		if err == nil {
+			wg.Wait()
+		}
+		return err
+	}, nil
+}
+
 func withOutgoingContext(ctx context.Context) context.Context {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if ok {
 		ctx = metadata.NewOutgoingContext(ctx, md)
 	}
 	return ctx
+}
+
+// Metadata passed to an exec that doesn't count towards the cache key.
+// This should be used with great caution; only for metadata that is
+// safe to be de-duplicated across execs.
+//
+// Currently, this uses the FTPProxy LLB option to pass without becoming
+// part of the cache key. This is a hack that, while ugly to look at,
+// is simple and robust. Alternatives would be to use secrets or sockets,
+// but they are more complicated, or to create a custom buildkit
+// worker/executor, which is MUCH more complicated.
+//
+// If a need to add ftp proxy support arises, then we can just also embed
+// the "real" ftp proxy setting in here too and have the shim handle
+// leaving only that set in the actual env var.
+type ContainerExecUncachedMetadata struct {
+	ParentClientIDs       []string      `json:"parentClientIDs,omitempty"`
+	ServerID              string        `json:"serverID,omitempty"`
+	ProgSockPath          string        `json:"progSockPath,omitempty"`
+	ModuleDigest          digest.Digest `json:"moduleDigest,omitempty"`
+	FunctionContextDigest digest.Digest `json:"functionContextDigest,omitempty"`
+}
+
+func (md ContainerExecUncachedMetadata) ToPBFtpProxyVal() (string, error) {
+	b, err := json.Marshal(md)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+func (md *ContainerExecUncachedMetadata) FromEnv(envKV string) (bool, error) {
+	_, val, ok := strings.Cut(envKV, "ftp_proxy=")
+	if !ok {
+		return false, nil
+	}
+	err := json.Unmarshal([]byte(val), md)
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }

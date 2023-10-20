@@ -6,7 +6,7 @@ defmodule Dagger.Codegen.Elixir.Templates.Object do
   alias Dagger.Codegen.Elixir.Type
 
   @id_modules [
-    "CacheID",
+    "CacheVolumeID",
     "ContainerID",
     "DirectoryID",
     "FileID",
@@ -193,7 +193,8 @@ defmodule Dagger.Codegen.Elixir.Templates.Object do
          {mod_var_name, args},
          %{"kind" => "NON_NULL", "ofType" => %{"kind" => "OBJECT", "name" => name}},
          _types
-       ) do
+       )
+       when field_name != "moduleConfig" do
     name = if(name == "Query", do: "Client", else: name)
     mod_name = Mod.from_name(name)
     args = render_args(args)

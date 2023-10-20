@@ -14,8 +14,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const alpineImage = "alpine:3.18.2"
-
 func devEngineContainer(c *dagger.Client) *dagger.Container {
 	// This loads the engine.tar file from the host into the container, that was set up by
 	// internal/mage/engine.go:test or by ./hack/dev. This is used to spin up additional dev engines.
@@ -30,11 +28,11 @@ func devEngineContainer(c *dagger.Client) *dagger.Container {
 		WithExposedPort(1234, dagger.ContainerWithExposedPortOpts{Protocol: dagger.Tcp})
 }
 
-func engineClientContainer(ctx context.Context, t *testing.T, c *dagger.Client, devEngine *dagger.Container) (*dagger.Container, error) {
+func engineClientContainer(ctx context.Context, t *testing.T, c *dagger.Client, devEngine *dagger.Service) (*dagger.Container, error) {
 	daggerCli := daggerCliFile(t, c)
 
 	cliBinPath := "/bin/dagger"
-	endpoint, err := devEngine.Endpoint(ctx, dagger.ContainerEndpointOpts{Port: 1234, Scheme: "tcp"})
+	endpoint, err := devEngine.Endpoint(ctx, dagger.ServiceEndpointOpts{Port: 1234, Scheme: "tcp"})
 	if err != nil {
 		return nil, err
 	}
@@ -78,25 +76,24 @@ func TestClientWaitsForEngine(t *testing.T) {
 
 	c, ctx := connect(t)
 
-	devEngine := devEngineContainer(c)
-	entrypoint, err := devEngine.File("/usr/local/bin/dagger-entrypoint.sh").Contents(ctx)
-
-	require.NoError(t, err)
-	before, after, found := strings.Cut(entrypoint, "set -e")
-	require.True(t, found, "missing set -e in entrypoint")
-	entrypoint = before + "set -e \n" + "sleep 15\n" + "echo my hostname is $(hostname)\n" + after
-
-	devEngine = devEngine.
-		WithNewFile("/usr/local/bin/dagger-entrypoint.sh", dagger.ContainerWithNewFileOpts{
-			Contents:    entrypoint,
+	devEngine := devEngineContainer(c).
+		WithNewFile("/usr/local/bin/slow-entrypoint.sh", dagger.ContainerWithNewFileOpts{
+			Contents: strings.Join([]string{
+				`#!/bin/sh`,
+				`set -eux`,
+				`sleep 15`,
+				`echo my hostname is $(hostname)`,
+				`exec /usr/local/bin/dagger-entrypoint.sh "$@"`,
+			}, "\n"),
 			Permissions: 0o700,
 		}).
 		WithMountedCache("/var/lib/dagger", c.CacheVolume("dagger-dev-engine-state-"+identity.NewID())).
+		WithEntrypoint([]string{"/usr/local/bin/slow-entrypoint.sh"}).
 		WithExec(nil, dagger.ContainerWithExecOpts{
 			InsecureRootCapabilities: true,
 		})
 
-	clientCtr, err := engineClientContainer(ctx, t, c, devEngine)
+	clientCtr, err := engineClientContainer(ctx, t, c, devEngine.AsService())
 	require.NoError(t, err)
 	_, err = clientCtr.
 		WithNewFile("/query.graphql", dagger.ContainerWithNewFileOpts{
@@ -111,14 +108,14 @@ func TestEngineSetsNameFromEnv(t *testing.T) {
 	c, ctx := connect(t)
 
 	engineName := "my-special-engine"
-	devEngine := devEngineContainer(c).
+	devEngineSvc := devEngineContainer(c).
 		WithEnvVariable("_EXPERIMENTAL_DAGGER_ENGINE_NAME", engineName).
 		WithMountedCache("/var/lib/dagger", c.CacheVolume("dagger-dev-engine-state-"+identity.NewID())).
 		WithExec([]string{"--addr", "tcp://0.0.0.0:1234"}, dagger.ContainerWithExecOpts{
 			InsecureRootCapabilities: true,
-		})
+		}).AsService()
 
-	clientCtr, err := engineClientContainer(ctx, t, c, devEngine)
+	clientCtr, err := engineClientContainer(ctx, t, c, devEngineSvc)
 	require.NoError(t, err)
 
 	out, err := clientCtr.
@@ -140,7 +137,8 @@ func TestDaggerRun(t *testing.T) {
 		WithMountedCache("/var/lib/dagger", c.CacheVolume("dagger-dev-engine-state-"+identity.NewID())).
 		WithExec(nil, dagger.ContainerWithExecOpts{
 			InsecureRootCapabilities: true,
-		})
+		}).
+		AsService()
 
 	clientCtr, err := engineClientContainer(ctx, t, c, devEngine)
 	require.NoError(t, err)
@@ -178,7 +176,8 @@ func TestClientSendsLabelsInTelemetry(t *testing.T) {
 			"--network-name", "daglabels",
 		}, dagger.ContainerWithExecOpts{
 			InsecureRootCapabilities: true,
-		})
+		}).
+		AsService()
 
 	thisRepoPath, err := filepath.Abs("../..")
 	require.NoError(t, err)
@@ -207,7 +206,8 @@ func TestClientSendsLabelsInTelemetry(t *testing.T) {
 		WithExec([]string{
 			"go", "run", "./core/integration/testdata/telemetry/",
 		}).
-		WithExposedPort(8080)
+		WithExposedPort(8080).
+		AsService()
 
 	eventsID := identity.NewID()
 

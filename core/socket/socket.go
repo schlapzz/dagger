@@ -7,45 +7,74 @@ import (
 
 	"github.com/dagger/dagger/core/resourceid"
 	"github.com/moby/buildkit/session/sshforward"
+	"github.com/opencontainers/go-digest"
 )
 
 type Socket struct {
+	// Unix
 	HostPath string `json:"host_path,omitempty"`
+
+	// IP
+	HostProtocol string `json:"host_protocol,omitempty"`
+	HostAddr     string `json:"host_addr,omitempty"`
 }
 
-type ID string
+type ID = resourceid.ID[Socket]
 
-func (id ID) String() string { return string(id) }
-
-func (id ID) ToSocket() (*Socket, error) {
-	var socket Socket
-	if err := resourceid.Decode(&socket, id); err != nil {
-		return nil, err
+func (socket *Socket) Digest() (digest.Digest, error) {
+	id, err := socket.ID()
+	if err != nil {
+		return "", err
 	}
-
-	return &socket, nil
+	return digest.FromString(string(id)), nil
 }
 
-func NewHostSocket(absPath string) *Socket {
+func NewHostUnixSocket(absPath string) *Socket {
 	return &Socket{
 		HostPath: absPath,
 	}
 }
 
 func (socket *Socket) ID() (ID, error) {
-	return resourceid.Encode[ID](socket)
+	return resourceid.Encode(socket)
+}
+
+func NewHostIPSocket(proto string, addr string) *Socket {
+	return &Socket{
+		HostAddr:     addr,
+		HostProtocol: proto,
+	}
 }
 
 func (socket *Socket) IsHost() bool {
-	return socket.HostPath != ""
+	return socket.HostPath != "" || socket.HostAddr != ""
 }
 
 func (socket *Socket) Server() (sshforward.SSHServer, error) {
+	// TODO udp
 	return &socketProxy{
 		dial: func() (io.ReadWriteCloser, error) {
-			return net.Dial("unix", socket.HostPath)
+			return net.Dial(socket.Network(), socket.Addr())
 		},
 	}, nil
+}
+
+func (socket *Socket) Network() string {
+	switch {
+	case socket.HostPath != "":
+		return "unix"
+	default:
+		return socket.HostProtocol
+	}
+}
+
+func (socket *Socket) Addr() string {
+	switch {
+	case socket.HostPath != "":
+		return socket.HostPath
+	default:
+		return socket.HostAddr
+	}
 }
 
 type socketProxy struct {

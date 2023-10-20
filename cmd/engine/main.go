@@ -274,9 +274,12 @@ func main() { //nolint:gocyclo
 		}
 
 		bklog.G(ctx).Debug("setting up engine tracing")
+
 		tp, err := detect.TracerProvider()
 		if err != nil {
-			return err
+			// just log it, this can happen when there's mismatching versions of otel libraries in your
+			// module dependency DAG...
+			bklog.G(ctx).WithError(err).Error("failed to create tracer provider")
 		}
 
 		streamTracer := otelgrpc.StreamServerInterceptor(otelgrpc.WithTracerProvider(tp), otelgrpc.WithPropagators(propagators))
@@ -711,7 +714,9 @@ func newController(ctx context.Context, c *cli.Context, cfg *config.Config) (*se
 
 	tc, err := detect.Exporter()
 	if err != nil {
-		return nil, nil, err
+		// just log it, this can happen when there's mismatching versions of otel libraries in your
+		// module dependency DAG...
+		bklog.G(ctx).WithError(err).Error("failed to create tracer exporter")
 	}
 
 	var traceSocket string
@@ -808,6 +813,7 @@ func newController(ctx context.Context, c *cli.Context, cfg *config.Config) (*se
 		TraceCollector:         tc,
 		UpstreamCacheExporters: remoteCacheExporterFuncs,
 		UpstreamCacheImporters: remoteCacheImporterFuncs,
+		DNSConfig:              getDNSConfig(cfg.DNS),
 	})
 	if err != nil {
 		return nil, nil, err
@@ -967,10 +973,6 @@ type networkConfig struct {
 }
 
 func setupNetwork(ctx context.Context, netName, netCIDR string) (*networkConfig, error) {
-	if os.Getenv(servicesDNSEnvName) == "0" {
-		return nil, nil
-	}
-
 	bridge, err := network.BridgeFromCIDR(netCIDR)
 	if err != nil {
 		return nil, fmt.Errorf("bridge from cidr: %w", err)

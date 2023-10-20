@@ -13,6 +13,7 @@ import (
 	"github.com/dagger/dagger/core"
 	"github.com/dagger/dagger/core/pipeline"
 	"github.com/dagger/dagger/core/socket"
+	"github.com/dagger/dagger/engine"
 
 	"github.com/moby/buildkit/frontend/dockerfile/shell"
 	"github.com/moby/buildkit/util/leaseutil"
@@ -41,70 +42,71 @@ func (s *containerSchema) Schema() string {
 }
 
 func (s *containerSchema) Resolvers() Resolvers {
-	return Resolvers{
-		"ContainerID": stringResolver(core.ContainerID("")),
+	rs := Resolvers{
 		"Query": ObjectResolver{
 			"container": ToResolver(s.container),
 		},
-		"Container": ObjectResolver{
-			"id":                   ToResolver(s.id),
-			"sync":                 ToResolver(s.sync),
-			"from":                 ToResolver(s.from),
-			"build":                ToResolver(s.build),
-			"rootfs":               ToResolver(s.rootfs),
-			"pipeline":             ToResolver(s.pipeline),
-			"withRootfs":           ToResolver(s.withRootfs),
-			"file":                 ToResolver(s.file),
-			"directory":            ToResolver(s.directory),
-			"user":                 ToResolver(s.user),
-			"withUser":             ToResolver(s.withUser),
-			"workdir":              ToResolver(s.workdir),
-			"withWorkdir":          ToResolver(s.withWorkdir),
-			"envVariables":         ToResolver(s.envVariables),
-			"envVariable":          ToResolver(s.envVariable),
-			"withEnvVariable":      ToResolver(s.withEnvVariable),
-			"withSecretVariable":   ToResolver(s.withSecretVariable),
-			"withoutEnvVariable":   ToResolver(s.withoutEnvVariable),
-			"withLabel":            ToResolver(s.withLabel),
-			"label":                ToResolver(s.label),
-			"labels":               ToResolver(s.labels),
-			"withoutLabel":         ToResolver(s.withoutLabel),
-			"entrypoint":           ToResolver(s.entrypoint),
-			"withEntrypoint":       ToResolver(s.withEntrypoint),
-			"defaultArgs":          ToResolver(s.defaultArgs),
-			"withDefaultArgs":      ToResolver(s.withDefaultArgs),
-			"mounts":               ToResolver(s.mounts),
-			"withMountedDirectory": ToResolver(s.withMountedDirectory),
-			"withMountedFile":      ToResolver(s.withMountedFile),
-			"withMountedTemp":      ToResolver(s.withMountedTemp),
-			"withMountedCache":     ToResolver(s.withMountedCache),
-			"withMountedSecret":    ToResolver(s.withMountedSecret),
-			"withUnixSocket":       ToResolver(s.withUnixSocket),
-			"withoutUnixSocket":    ToResolver(s.withoutUnixSocket),
-			"withoutMount":         ToResolver(s.withoutMount),
-			"withFile":             ToResolver(s.withFile),
-			"withNewFile":          ToResolver(s.withNewFile),
-			"withDirectory":        ToResolver(s.withDirectory),
-			"withExec":             ToResolver(s.withExec),
-			"stdout":               ToResolver(s.stdout),
-			"stderr":               ToResolver(s.stderr),
-			"publish":              ToResolver(s.publish),
-			"platform":             ToResolver(s.platform),
-			"export":               ToResolver(s.export),
-			"import":               ToResolver(s.import_),
-			"withRegistryAuth":     ToResolver(s.withRegistryAuth),
-			"withoutRegistryAuth":  ToResolver(s.withoutRegistryAuth),
-			"imageRef":             ToResolver(s.imageRef),
-			"withExposedPort":      ToResolver(s.withExposedPort),
-			"withoutExposedPort":   ToResolver(s.withoutExposedPort),
-			"exposedPorts":         ToResolver(s.exposedPorts),
-			"hostname":             ToResolver(s.hostname),
-			"endpoint":             ToResolver(s.endpoint),
-			"withServiceBinding":   ToResolver(s.withServiceBinding),
-			"withFocus":            ToResolver(s.withFocus),
-			"withoutFocus":         ToResolver(s.withoutFocus),
-		},
 	}
+
+	ResolveIDable[core.Container](rs, "Container", ObjectResolver{
+		"sync":                 ToResolver(s.sync),
+		"from":                 ToResolver(s.from),
+		"build":                ToResolver(s.build),
+		"rootfs":               ToResolver(s.rootfs),
+		"pipeline":             ToResolver(s.pipeline),
+		"withRootfs":           ToResolver(s.withRootfs),
+		"file":                 ToResolver(s.file),
+		"directory":            ToResolver(s.directory),
+		"user":                 ToResolver(s.user),
+		"withUser":             ToResolver(s.withUser),
+		"workdir":              ToResolver(s.workdir),
+		"withWorkdir":          ToResolver(s.withWorkdir),
+		"envVariables":         ToResolver(s.envVariables),
+		"envVariable":          ToResolver(s.envVariable),
+		"withEnvVariable":      ToResolver(s.withEnvVariable),
+		"withSecretVariable":   ToResolver(s.withSecretVariable),
+		"withoutEnvVariable":   ToResolver(s.withoutEnvVariable),
+		"withLabel":            ToResolver(s.withLabel),
+		"label":                ToResolver(s.label),
+		"labels":               ToResolver(s.labels),
+		"withoutLabel":         ToResolver(s.withoutLabel),
+		"entrypoint":           ToResolver(s.entrypoint),
+		"withEntrypoint":       ToResolver(s.withEntrypoint),
+		"defaultArgs":          ToResolver(s.defaultArgs),
+		"withDefaultArgs":      ToResolver(s.withDefaultArgs),
+		"mounts":               ToResolver(s.mounts),
+		"withMountedDirectory": ToResolver(s.withMountedDirectory),
+		"withMountedFile":      ToResolver(s.withMountedFile),
+		"withMountedTemp":      ToResolver(s.withMountedTemp),
+		"withMountedCache":     ToResolver(s.withMountedCache),
+		"withMountedSecret":    ToResolver(s.withMountedSecret),
+		"withUnixSocket":       ToResolver(s.withUnixSocket),
+		"withoutUnixSocket":    ToResolver(s.withoutUnixSocket),
+		"withoutMount":         ToResolver(s.withoutMount),
+		"withFile":             ToResolver(s.withFile),
+		"withNewFile":          ToResolver(s.withNewFile),
+		"withDirectory":        ToResolver(s.withDirectory),
+		"withExec":             ToResolver(s.withExec),
+		"stdout":               ToResolver(s.stdout),
+		"stderr":               ToResolver(s.stderr),
+		"publish":              ToResolver(s.publish),
+		"platform":             ToResolver(s.platform),
+		"export":               ToResolver(s.export),
+		"asTarball":            ToResolver(s.asTarball),
+		"import":               ToResolver(s.import_),
+		"withRegistryAuth":     ToResolver(s.withRegistryAuth),
+		"withoutRegistryAuth":  ToResolver(s.withoutRegistryAuth),
+		"imageRef":             ToResolver(s.imageRef),
+		"withExposedPort":      ToResolver(s.withExposedPort),
+		"withoutExposedPort":   ToResolver(s.withoutExposedPort),
+		"exposedPorts":         ToResolver(s.exposedPorts),
+		"withServiceBinding":   ToResolver(s.withServiceBinding),
+		"withFocus":            ToResolver(s.withFocus),
+		"withoutFocus":         ToResolver(s.withoutFocus),
+		"shellEndpoint":        ToResolver(s.shellEndpoint),
+	})
+
+	return rs
 }
 
 func (s *containerSchema) Dependencies() []ExecutableSchema {
@@ -116,15 +118,14 @@ type containerArgs struct {
 	Platform *specs.Platform
 }
 
-func (s *containerSchema) container(ctx *core.Context, parent *core.Query, args containerArgs) (*core.Container, error) {
+func (s *containerSchema) container(ctx *core.Context, parent *core.Query, args containerArgs) (_ *core.Container, rerr error) {
+	if args.ID != "" {
+		return args.ID.Decode()
+	}
 	platform := s.MergedSchemas.platform
 	if args.Platform != nil {
-		if args.ID != "" {
-			return nil, fmt.Errorf("cannot specify both existing container ID and platform")
-		}
 		platform = *args.Platform
 	}
-
 	ctr, err := core.NewContainer(args.ID, parent.PipelinePath(), platform)
 	if err != nil {
 		return nil, err
@@ -133,14 +134,10 @@ func (s *containerSchema) container(ctx *core.Context, parent *core.Query, args 
 }
 
 func (s *containerSchema) sync(ctx *core.Context, parent *core.Container, _ any) (core.ContainerID, error) {
-	err := parent.Evaluate(ctx, s.bk, s.svcs)
+	_, err := parent.Evaluate(ctx, s.bk, s.svcs)
 	if err != nil {
 		return "", err
 	}
-	return parent.ID()
-}
-
-func (s *containerSchema) id(ctx *core.Context, parent *core.Container, args any) (core.ContainerID, error) {
 	return parent.ID()
 }
 
@@ -161,7 +158,7 @@ type containerBuildArgs struct {
 }
 
 func (s *containerSchema) build(ctx *core.Context, parent *core.Container, args containerBuildArgs) (*core.Container, error) {
-	dir, err := args.Context.ToDirectory()
+	dir, err := args.Context.Decode()
 	if err != nil {
 		return nil, err
 	}
@@ -183,7 +180,7 @@ type containerWithRootFSArgs struct {
 }
 
 func (s *containerSchema) withRootfs(ctx *core.Context, parent *core.Container, args containerWithRootFSArgs) (*core.Container, error) {
-	dir, err := args.Directory.ToDirectory()
+	dir, err := args.Directory.Decode()
 	if err != nil {
 		return nil, err
 	}
@@ -433,11 +430,11 @@ type containerWithMountedDirectoryArgs struct {
 }
 
 func (s *containerSchema) withMountedDirectory(ctx *core.Context, parent *core.Container, args containerWithMountedDirectoryArgs) (*core.Container, error) {
-	dir, err := args.Source.ToDirectory()
+	dir, err := args.Source.Decode()
 	if err != nil {
 		return nil, err
 	}
-	return parent.WithMountedDirectory(ctx, s.bk, args.Path, dir, args.Owner)
+	return parent.WithMountedDirectory(ctx, s.bk, args.Path, dir, args.Owner, false)
 }
 
 type containerPublishArgs struct {
@@ -458,16 +455,16 @@ type containerWithMountedFileArgs struct {
 }
 
 func (s *containerSchema) withMountedFile(ctx *core.Context, parent *core.Container, args containerWithMountedFileArgs) (*core.Container, error) {
-	file, err := args.Source.ToFile()
+	file, err := args.Source.Decode()
 	if err != nil {
 		return nil, err
 	}
-	return parent.WithMountedFile(ctx, s.bk, args.Path, file, args.Owner)
+	return parent.WithMountedFile(ctx, s.bk, args.Path, file, args.Owner, false)
 }
 
 type containerWithMountedCacheArgs struct {
 	Path        string
-	Cache       core.CacheID
+	Cache       core.CacheVolumeID
 	Source      core.DirectoryID
 	Concurrency core.CacheSharingMode
 	Owner       string
@@ -477,13 +474,13 @@ func (s *containerSchema) withMountedCache(ctx *core.Context, parent *core.Conta
 	var dir *core.Directory
 	if args.Source != "" {
 		var err error
-		dir, err = args.Source.ToDirectory()
+		dir, err = args.Source.Decode()
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	cache, err := args.Cache.ToCacheVolume()
+	cache, err := args.Cache.Decode()
 	if err != nil {
 		return nil, err
 	}
@@ -571,7 +568,7 @@ type containerWithSecretVariableArgs struct {
 }
 
 func (s *containerSchema) withSecretVariable(ctx *core.Context, parent *core.Container, args containerWithSecretVariableArgs) (*core.Container, error) {
-	secret, err := args.Secret.ToSecret()
+	secret, err := args.Secret.Decode()
 	if err != nil {
 		return nil, err
 	}
@@ -586,7 +583,7 @@ type containerWithMountedSecretArgs struct {
 }
 
 func (s *containerSchema) withMountedSecret(ctx *core.Context, parent *core.Container, args containerWithMountedSecretArgs) (*core.Container, error) {
-	secret, err := args.Source.ToSecret()
+	secret, err := args.Source.Decode()
 	if err != nil {
 		return nil, err
 	}
@@ -599,7 +596,7 @@ type containerWithDirectoryArgs struct {
 }
 
 func (s *containerSchema) withDirectory(ctx *core.Context, parent *core.Container, args containerWithDirectoryArgs) (*core.Container, error) {
-	dir, err := args.Directory.ToDirectory()
+	dir, err := args.Directory.Decode()
 	if err != nil {
 		return nil, err
 	}
@@ -612,7 +609,7 @@ type containerWithFileArgs struct {
 }
 
 func (s *containerSchema) withFile(ctx *core.Context, parent *core.Container, args containerWithFileArgs) (*core.Container, error) {
-	file, err := args.Source.ToFile()
+	file, err := args.Source.Decode()
 	if err != nil {
 		return nil, err
 	}
@@ -635,7 +632,7 @@ type containerWithUnixSocketArgs struct {
 }
 
 func (s *containerSchema) withUnixSocket(ctx *core.Context, parent *core.Container, args containerWithUnixSocketArgs) (*core.Container, error) {
-	socket, err := args.Source.ToSocket()
+	socket, err := args.Source.Decode()
 	if err != nil {
 		return nil, err
 	}
@@ -667,6 +664,16 @@ func (s *containerSchema) export(ctx *core.Context, parent *core.Container, args
 	}
 
 	return true, nil
+}
+
+type containerAsTarballArgs struct {
+	PlatformVariants  []core.ContainerID
+	ForcedCompression core.ImageLayerCompression
+	MediaTypes        core.ImageMediaTypes
+}
+
+func (s *containerSchema) asTarball(ctx *core.Context, parent *core.Container, args containerAsTarballArgs) (*core.File, error) {
+	return parent.AsTarball(ctx, s.bk, s.MergedSchemas.platform, s.svcs, args.PlatformVariants, args.ForcedCompression, args.MediaTypes)
 }
 
 type containerImportArgs struct {
@@ -723,41 +730,13 @@ func (s *containerSchema) imageRef(ctx *core.Context, parent *core.Container, ar
 	return parent.ImageRefOrErr(ctx, s.bk)
 }
 
-func (s *containerSchema) hostname(ctx *core.Context, parent *core.Container, args any) (string, error) {
-	svc, err := parent.Service(ctx, s.bk, s.progSockPath)
-	if err != nil {
-		return "", err
-	}
-
-	return svc.Hostname(ctx, s.svcs)
-}
-
-type containerEndpointArgs struct {
-	Port   int
-	Scheme string
-}
-
-func (s *containerSchema) endpoint(ctx *core.Context, parent *core.Container, args containerEndpointArgs) (string, error) {
-	svc, err := parent.Service(ctx, s.bk, s.progSockPath)
-	if err != nil {
-		return "", err
-	}
-
-	return svc.Endpoint(ctx, s.svcs, args.Port, args.Scheme)
-}
-
-type containerWithServiceDependencyArgs struct {
-	Service core.ContainerID
+type containerWithServiceBindingArgs struct {
+	Service core.ServiceID
 	Alias   string
 }
 
-func (s *containerSchema) withServiceBinding(ctx *core.Context, parent *core.Container, args containerWithServiceDependencyArgs) (*core.Container, error) {
-	ctr, err := args.Service.ToContainer()
-	if err != nil {
-		return nil, err
-	}
-
-	svc, err := ctr.Service(ctx, s.bk, s.progSockPath)
+func (s *containerSchema) withServiceBinding(ctx *core.Context, parent *core.Container, args containerWithServiceBindingArgs) (*core.Container, error) {
+	svc, err := args.Service.Decode()
 	if err != nil {
 		return nil, err
 	}
@@ -842,4 +821,19 @@ func (s *containerSchema) withoutFocus(ctx *core.Context, parent *core.Container
 	child := parent.Clone()
 	child.Focused = false
 	return child, nil
+}
+
+func (s *containerSchema) shellEndpoint(ctx *core.Context, parent *core.Container, args any) (string, error) {
+	endpoint, handler, err := parent.ShellEndpoint(s.bk, s.progSockPath, s.services)
+	if err != nil {
+		return "", err
+	}
+
+	clientMetadata, err := engine.ClientMetadataFromContext(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	s.MuxEndpoint(path.Join("/", endpoint), handler, clientMetadata.ModuleDigest)
+	return "ws://dagger/" + endpoint, nil
 }

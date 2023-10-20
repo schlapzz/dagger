@@ -13,6 +13,59 @@ import javax.lang.model.element.Modifier;
 
 public class Helpers {
 
+  private static final List<String> JAVA_KEYWORDS =
+      List.of(
+          "abstract",
+          "continue",
+          "for",
+          "new",
+          "switch",
+          "assert",
+          "default",
+          "goto",
+          "package",
+          "synchronized",
+          "boolean",
+          "do",
+          "if",
+          "private",
+          "this",
+          "break",
+          "double",
+          "implements",
+          "protected",
+          "throw",
+          "byte",
+          "else",
+          "import",
+          "public",
+          "throws",
+          "case",
+          "enum",
+          "instanceof",
+          "return",
+          "transient",
+          "catch",
+          "extends",
+          "int",
+          "short",
+          "try",
+          "char",
+          "final",
+          "interface",
+          "static",
+          "void",
+          "class",
+          "finally",
+          "long",
+          "strictfp",
+          "volatile",
+          "const",
+          "float",
+          "native",
+          "super",
+          "while");
+
   private static final Map<String, String> CUSTOM_SCALARS =
       new HashMap<>() {
         {
@@ -20,21 +73,24 @@ public class Helpers {
           put("FileID", "File");
           put("DirectoryID", "Directory");
           put("SecretID", "Secret");
+          put("ServiceID", "Service");
           put("SocketID", "Socket");
-          put("CacheID", "CacheVolume");
-          put("ProjectID", "Project");
-          put("ProjectCommandID", "ProjectCommand");
+          put("CacheVolumeID", "CacheVolume");
+          put("ModuleID", "Module");
+          put("FunctionID", "Function");
+          put("TypeDefID", "TypeDef");
+          put("GeneratedCodeID", "GeneratedCode");
+          put("Platform", "Platform");
+          put("JSON", "JSON");
+          put("Void", "Void");
         }
       };
 
   static boolean isScalar(String typeName) {
-    return CUSTOM_SCALARS.containsKey(typeName) || "Platform".equals(typeName);
+    return CUSTOM_SCALARS.containsKey(typeName);
   }
 
   static ClassName convertScalarToObject(String typeName) {
-    if ("Platform".equals(typeName)) {
-      return ClassName.bestGuess(typeName);
-    }
     if (CUSTOM_SCALARS.containsKey(typeName)) {
       return ClassName.bestGuess(CUSTOM_SCALARS.get(typeName));
     }
@@ -88,6 +144,14 @@ public class Helpers {
       return "importTarball";
     } else {
       return field.getName();
+    }
+  }
+
+  static String formatName(InputValue arg) {
+    if (JAVA_KEYWORDS.contains(arg.getName())) {
+      return "_" + arg.getName();
+    } else {
+      return arg.getName();
     }
   }
 

@@ -77,6 +77,11 @@ func RepositoryGoCodeOnly(c *dagger.Client) *dagger.Directory {
 			// misc
 			".golangci.yml",
 			"**/README.md", // needed for examples test
+			"**/help.txt",  // needed for linting module bootstrap code
+			"sdk/go/codegen/generator/nodejs/templates/src/testdata/**/*",
+
+			// Go SDK runtime codegen
+			"**/dagger.json",
 		},
 	})
 }
@@ -146,11 +151,11 @@ func HostDaggerBinary(c *dagger.Client) *dagger.File {
 	return PlatformDaggerBinary(c, runtime.GOOS, runtime.GOARCH, goarm)
 }
 
-// ClientGenBinary returns a compiled dagger binary
-func ClientGenBinary(c *dagger.Client) *dagger.File {
+// CodegenBinary returns a binary for generating the Go and NodeJS SDKs.
+func CodegenBinary(c *dagger.Client) *dagger.File {
 	return goBase(c).
-		WithExec([]string{"go", "build", "-o", "./bin/client-gen", "-ldflags", "-s -w", "./cmd/client-gen"}).
-		File("./bin/client-gen")
+		WithExec([]string{"go", "build", "-o", "./bin/codegen", "-ldflags", "-s -w", "./cmd/codegen"}).
+		File("./bin/codegen")
 }
 
 // HostDockerCredentials returns the host's ~/.docker dir if it exists, otherwise just an empty dir

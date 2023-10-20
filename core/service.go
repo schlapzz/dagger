@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -20,9 +22,24 @@ import (
 	"github.com/vito/progrock"
 )
 
+const (
+	ShimEnableTTYEnvVar = "_DAGGER_ENABLE_TTY"
+)
+
 type Service struct {
 	// Container is the container to run as a service.
 	Container *Container `json:"container"`
+
+	// TunnelUpstream is the service that this service is tunnelling to.
+	TunnelUpstream *Service `json:"upstream,omitempty"`
+	// TunnelPorts configures the port forwarding rules for the tunnel.
+	TunnelPorts []PortForward `json:"tunnel_ports,omitempty"`
+
+	// HostUpstream is the host address (i.e. hostname or IP) for the reverse
+	// tunnel to request through the host.
+	HostUpstream string `json:"reverse_tunnel_upstream_addr,omitempty"`
+	// HostPorts configures the port forwarding rules for the host.
+	HostPorts []PortForward `json:"host_ports,omitempty"`
 }
 
 func NewContainerService(ctr *Container) *Service {
@@ -31,42 +48,23 @@ func NewContainerService(ctr *Container) *Service {
 	}
 }
 
-type ServiceID string
-
-func (id ServiceID) String() string {
-	return string(id)
+func NewTunnelService(upstream *Service, ports []PortForward) *Service {
+	return &Service{
+		TunnelUpstream: upstream,
+		TunnelPorts:    ports,
+	}
 }
 
-// ServiceID is digestible so that smaller hashes can be displayed in
-// --debug vertex names.
-var _ Digestible = ServiceID("")
-
-func (id ServiceID) Digest() (digest.Digest, error) {
-	svc, err := id.ToService()
-	if err != nil {
-		return "", err
+func NewHostService(upstream string, ports []PortForward) *Service {
+	return &Service{
+		HostUpstream: upstream,
+		HostPorts:    ports,
 	}
-	return svc.Digest()
-}
-
-func (id ServiceID) ToService() (*Service, error) {
-	var service Service
-
-	if id == "" {
-		// scratch
-		return &service, nil
-	}
-
-	if err := resourceid.Decode(&service, id); err != nil {
-		return nil, err
-	}
-
-	return &service, nil
 }
 
 // ID marshals the service into a content-addressed ID.
 func (svc *Service) ID() (ServiceID, error) {
-	return resourceid.Encode[ServiceID](svc)
+	return resourceid.Encode(svc)
 }
 
 var _ pipeline.Pipelineable = (*Service)(nil)
@@ -78,6 +76,11 @@ func (svc *Service) Clone() *Service {
 	if cp.Container != nil {
 		cp.Container = cp.Container.Clone()
 	}
+	if cp.TunnelUpstream != nil {
+		cp.TunnelUpstream = cp.TunnelUpstream.Clone()
+	}
+	cp.TunnelPorts = cloneSlice(cp.TunnelPorts)
+	cp.HostPorts = cloneSlice(cp.HostPorts)
 	return &cp
 }
 
@@ -86,6 +89,8 @@ func (svc *Service) PipelinePath() pipeline.Path {
 	switch {
 	case svc.Container != nil:
 		return svc.Container.Pipeline
+	case svc.TunnelUpstream != nil:
+		return svc.TunnelUpstream.PipelinePath()
 	default:
 		return pipeline.Path{}
 	}
@@ -93,7 +98,7 @@ func (svc *Service) PipelinePath() pipeline.Path {
 
 // Service is digestible so that it can be recorded as an output of the
 // --debug vertex that created it.
-var _ Digestible = (*Service)(nil)
+var _ resourceid.Digestible = (*Service)(nil)
 
 // Digest returns the service's content hash.
 func (svc *Service) Digest() (digest.Digest, error) {
@@ -102,7 +107,15 @@ func (svc *Service) Digest() (digest.Digest, error) {
 
 func (svc *Service) Hostname(ctx context.Context, svcs *Services) (string, error) {
 	switch {
-	case svc.Container != nil: // container=>container
+	case svc.TunnelUpstream != nil: // host=>container (127.0.0.1)
+		upstream, err := svcs.Get(ctx, svc)
+		if err != nil {
+			return "", err
+		}
+
+		return upstream.Host, nil
+	case svc.Container != nil, // container=>container
+		svc.HostUpstream != "": // container=>host
 		dig, err := svc.Digest()
 		if err != nil {
 			return "", err
@@ -116,6 +129,13 @@ func (svc *Service) Hostname(ctx context.Context, svcs *Services) (string, error
 
 func (svc *Service) Ports(ctx context.Context, svcs *Services) ([]Port, error) {
 	switch {
+	case svc.TunnelUpstream != nil, svc.HostUpstream != "":
+		running, err := svcs.Get(ctx, svc)
+		if err != nil {
+			return nil, err
+		}
+
+		return running.Ports, nil
 	case svc.Container != nil:
 		return svc.Container.Ports, nil
 	default:
@@ -140,6 +160,34 @@ func (svc *Service) Endpoint(ctx context.Context, svcs *Services, port int, sche
 
 			port = svc.Container.Ports[0].Port
 		}
+	case svc.TunnelUpstream != nil:
+		tunnel, err := svcs.Get(ctx, svc)
+		if err != nil {
+			return "", err
+		}
+
+		host = tunnel.Host
+
+		if port == 0 {
+			if len(tunnel.Ports) == 0 {
+				return "", fmt.Errorf("no ports")
+			}
+
+			port = tunnel.Ports[0].Port
+		}
+	case svc.HostUpstream != "":
+		host, err = svc.Hostname(ctx, svcs)
+		if err != nil {
+			return "", err
+		}
+
+		if port == 0 {
+			if len(svc.HostPorts) == 0 {
+				return "", fmt.Errorf("no ports")
+			}
+
+			port = svc.HostPorts[0].FrontendOrBackendPort()
+		}
 	default:
 		return "", fmt.Errorf("unknown service type")
 	}
@@ -152,16 +200,37 @@ func (svc *Service) Endpoint(ctx context.Context, svcs *Services, port int, sche
 	return endpoint, nil
 }
 
-func (svc *Service) Start(ctx context.Context, bk *buildkit.Client, svcs *Services) (running *RunningService, err error) {
+func (svc *Service) Start(
+	ctx context.Context,
+	bk *buildkit.Client,
+	svcs *Services,
+	interactive bool,
+	forwardStdin func(io.Writer, bkgw.ContainerProcess),
+	forwardStdout func(io.Reader),
+	forwardStderr func(io.Reader),
+) (running *RunningService, err error) {
 	switch {
 	case svc.Container != nil:
-		return svc.startContainer(ctx, bk, svcs)
+		return svc.startContainer(ctx, bk, svcs, interactive, forwardStdin, forwardStdout, forwardStderr)
+	case svc.TunnelUpstream != nil:
+		return svc.startTunnel(ctx, bk, svcs)
+	case svc.HostUpstream != "":
+		return svc.startReverseTunnel(ctx, bk, svcs)
 	default:
 		return nil, fmt.Errorf("unknown service type")
 	}
 }
 
-func (svc *Service) startContainer(ctx context.Context, bk *buildkit.Client, svcs *Services) (running *RunningService, err error) {
+// nolint: gocyclo
+func (svc *Service) startContainer(
+	ctx context.Context,
+	bk *buildkit.Client,
+	svcs *Services,
+	interactive bool,
+	forwardStdin func(io.Writer, bkgw.ContainerProcess),
+	forwardStdout func(io.Reader),
+	forwardStderr func(io.Reader),
+) (running *RunningService, err error) {
 	dig, err := svc.Digest()
 	if err != nil {
 		return nil, err
@@ -184,17 +253,17 @@ func (svc *Service) startContainer(ctx context.Context, bk *buildkit.Client, svc
 
 	ctr := svc.Container
 
-	dag, err := defToDAG(ctr.FS)
+	dag, err := buildkit.DefToDAG(ctr.FS)
 	if err != nil {
 		return nil, err
 	}
 
-	if dag.GetOp() == nil && len(dag.inputs) == 1 {
-		dag = dag.inputs[0]
+	if dag.GetOp() == nil && len(dag.Inputs) == 1 {
+		dag = dag.Inputs[0]
 	} else {
 		// i mean, theoretically this should never happen, but it's better to
 		// notice it
-		return nil, fmt.Errorf("what in tarnation? that's too many inputs! (%d) %v", len(dag.inputs), dag.GetInputs())
+		return nil, fmt.Errorf("what in tarnation? that's too many inputs! (%d) %v", len(dag.Inputs), dag.GetInputs())
 	}
 
 	execOp, ok := dag.AsExec()
@@ -281,24 +350,75 @@ func (svc *Service) startContainer(ctx context.Context, bk *buildkit.Client, svc
 		checked <- health.Check(ctx)
 	}()
 
+	if execOp.Meta.ProxyEnv == nil {
+		execOp.Meta.ProxyEnv = &pb.ProxyEnv{}
+	}
+
+	execOp.Meta.ProxyEnv.FtpProxy, err = buildkit.ContainerExecUncachedMetadata{
+		ParentClientIDs:       clientMetadata.ClientIDs(),
+		ServerID:              clientMetadata.ServerID,
+		ProgSockPath:          bk.ProgSockPath,
+		ModuleDigest:          clientMetadata.ModuleDigest,
+		FunctionContextDigest: clientMetadata.FunctionContextDigest,
+	}.ToPBFtpProxyVal()
+	if err != nil {
+		return nil, err
+	}
+
+	env := append([]string{}, execOp.Meta.Env...)
+	env = append(env, proxyEnvList(execOp.Meta.ProxyEnv)...)
+	if interactive {
+		env = append(env, ShimEnableTTYEnvVar+"=1")
+	}
+
 	outBuf := new(bytes.Buffer)
+	var stdinCtr, stdoutClient, stderrClient io.ReadCloser
+	var stdinClient, stdoutCtr, stderrCtr io.WriteCloser
+	if forwardStdin != nil {
+		stdinCtr, stdinClient = io.Pipe()
+	}
+
+	if forwardStdout != nil {
+		stdoutClient, stdoutCtr = io.Pipe()
+	} else {
+		stdoutCtr = nopCloser{io.MultiWriter(vtx.Stdout(), outBuf)}
+	}
+
+	if forwardStderr != nil {
+		stderrClient, stderrCtr = io.Pipe()
+	} else {
+		stderrCtr = nopCloser{io.MultiWriter(vtx.Stderr(), outBuf)}
+	}
+
 	svcProc, err := gc.Start(ctx, bkgw.StartRequest{
 		Args:         execOp.Meta.Args,
-		Env:          append(execOp.Meta.Env, proxyEnvList(execOp.Meta.ProxyEnv)...),
+		Env:          env,
 		Cwd:          execOp.Meta.Cwd,
 		User:         execOp.Meta.User,
 		SecretEnv:    execOp.Secretenv,
-		Tty:          false,
-		Stdout:       nopCloser{io.MultiWriter(vtx.Stdout(), outBuf)},
-		Stderr:       nopCloser{io.MultiWriter(vtx.Stderr(), outBuf)},
+		Tty:          interactive,
+		Stdin:        stdinCtr,
+		Stdout:       stdoutCtr,
+		Stderr:       stderrCtr,
 		SecurityMode: execOp.Security,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("start container: %w", err)
 	}
 
+	if forwardStdin != nil {
+		forwardStdin(stdinClient, svcProc)
+	}
+	if forwardStdout != nil {
+		forwardStdout(stdoutClient)
+	}
+	if forwardStderr != nil {
+		forwardStderr(stderrClient)
+	}
+
 	exited := make(chan error, 1)
 	go func() {
+		defer close(exited)
 		exited <- svcProc.Wait()
 
 		// detach dependent services when process exits
@@ -333,13 +453,22 @@ func (svc *Service) startContainer(ctx context.Context, bk *buildkit.Client, svc
 		}
 
 		return &RunningService{
-			Host:  fullHost,
-			Ports: ctr.Ports,
+			Service: svc,
+			Host:    fullHost,
+			Ports:   ctr.Ports,
 			Key: ServiceKey{
 				Digest:   dig,
 				ClientID: clientMetadata.ClientID,
 			},
 			Stop: stopSvc,
+			Wait: func(ctx context.Context) error {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case err := <-exited:
+					return err
+				}
+			},
 		}, nil
 	case err := <-exited:
 		if err != nil {
@@ -351,6 +480,9 @@ func (svc *Service) startContainer(ctx context.Context, bk *buildkit.Client, svc
 }
 
 func proxyEnvList(p *pb.ProxyEnv) []string {
+	if p == nil {
+		return nil
+	}
 	out := []string{}
 	if v := p.HttpProxy; v != "" {
 		out = append(out, "HTTP_PROXY="+v, "http_proxy="+v)
@@ -368,6 +500,172 @@ func proxyEnvList(p *pb.ProxyEnv) []string {
 		out = append(out, "ALL_PROXY="+v, "all_proxy="+v)
 	}
 	return out
+}
+
+func (svc *Service) startTunnel(ctx context.Context, bk *buildkit.Client, svcs *Services) (running *RunningService, err error) {
+	svcCtx, stop := context.WithCancel(context.Background())
+
+	clientMetadata, err := engine.ClientMetadataFromContext(ctx)
+	if err != nil {
+		stop()
+		return nil, err
+	}
+	svcCtx = engine.ContextWithClientMetadata(svcCtx, clientMetadata)
+
+	svcCtx = progrock.ToContext(svcCtx, progrock.FromContext(ctx))
+
+	upstream, err := svcs.Start(svcCtx, svc.TunnelUpstream)
+	if err != nil {
+		stop()
+		return nil, fmt.Errorf("start upstream: %w", err)
+	}
+
+	closers := make([]func() error, len(svc.TunnelPorts))
+	ports := make([]Port, len(svc.TunnelPorts))
+
+	// TODO: make these configurable?
+	const bindHost = "0.0.0.0"
+	const dialHost = "127.0.0.1"
+
+	for i, forward := range svc.TunnelPorts {
+		res, closeListener, err := bk.ListenHostToContainer(
+			svcCtx,
+			fmt.Sprintf("%s:%d", bindHost, forward.Frontend),
+			forward.Protocol.Network(),
+			fmt.Sprintf("%s:%d", upstream.Host, forward.Backend),
+		)
+		if err != nil {
+			stop()
+			return nil, fmt.Errorf("host to container: %w", err)
+		}
+
+		_, portStr, err := net.SplitHostPort(res.GetAddr())
+		if err != nil {
+			stop()
+			return nil, fmt.Errorf("split host port: %w", err)
+		}
+
+		port, err := strconv.Atoi(portStr)
+		if err != nil {
+			stop()
+			return nil, fmt.Errorf("parse port: %w", err)
+		}
+
+		desc := fmt.Sprintf("tunnel %s:%d -> %s:%d", bindHost, port, upstream.Host, forward.Backend)
+
+		ports[i] = Port{
+			Port:        port,
+			Protocol:    forward.Protocol,
+			Description: &desc,
+		}
+
+		closers[i] = closeListener
+	}
+
+	dig, err := svc.Digest()
+	if err != nil {
+		stop()
+		return nil, err
+	}
+
+	return &RunningService{
+		Service: svc,
+		Key: ServiceKey{
+			Digest:   dig,
+			ClientID: clientMetadata.ClientID,
+		},
+		Host:  dialHost,
+		Ports: ports,
+		Stop: func(context.Context) error {
+			stop()
+			// HACK(vito): do this async to prevent deadlock (this is called in Detach)
+			go svcs.Detach(svcCtx, upstream)
+			var errs []error
+			for _, closeListener := range closers {
+				errs = append(errs, closeListener())
+			}
+			return errors.Join(errs...)
+		},
+	}, nil
+}
+
+func (svc *Service) startReverseTunnel(ctx context.Context, bk *buildkit.Client, svcs *Services) (running *RunningService, err error) {
+	dig, err := svc.Digest()
+	if err != nil {
+		return nil, err
+	}
+
+	host, err := svc.Hostname(ctx, svcs)
+	if err != nil {
+		return nil, err
+	}
+
+	clientMetadata, err := engine.ClientMetadataFromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	rec := progrock.FromContext(ctx)
+
+	svcCtx, stop := context.WithCancel(context.Background())
+	svcCtx = engine.ContextWithClientMetadata(svcCtx, clientMetadata)
+	svcCtx = progrock.ToContext(svcCtx, rec)
+
+	fullHost := host + "." + network.ClientDomain(clientMetadata.ClientID)
+
+	tunnel := &c2hTunnel{
+		bk:                 bk,
+		upstreamHost:       svc.HostUpstream,
+		tunnelServiceHost:  fullHost,
+		tunnelServicePorts: svc.HostPorts,
+	}
+
+	checkPorts := []Port{}
+	for _, p := range svc.HostPorts {
+		desc := fmt.Sprintf("tunnel %s %d -> %d", p.Protocol, p.FrontendOrBackendPort(), p.Backend)
+		checkPorts = append(checkPorts, Port{
+			Port:        p.FrontendOrBackendPort(),
+			Protocol:    p.Protocol,
+			Description: &desc,
+		})
+	}
+
+	check := newHealth(bk, fullHost, checkPorts)
+
+	exited := make(chan error, 1)
+	go func() {
+		exited <- tunnel.Tunnel(svcCtx)
+	}()
+
+	checked := make(chan error, 1)
+	go func() {
+		checked <- check.Check(svcCtx)
+	}()
+
+	select {
+	case err := <-checked:
+		if err != nil {
+			stop()
+			return nil, fmt.Errorf("health check errored: %w", err)
+		}
+
+		return &RunningService{
+			Service: svc,
+			Key: ServiceKey{
+				Digest:   dig,
+				ClientID: clientMetadata.ClientID,
+			},
+			Host:  fullHost,
+			Ports: checkPorts,
+			Stop: func(context.Context) error {
+				stop()
+				return nil
+			},
+		}, nil
+	case err := <-exited:
+		stop()
+		return nil, fmt.Errorf("proxy exited: %w", err)
+	}
 }
 
 type ServiceBindings []ServiceBinding

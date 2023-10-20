@@ -245,7 +245,7 @@ class DaggerPipeline {
 1. The `buildRuntimeImage()` method executes a GraphQL query to construct a runtime image. This runtime image consists of the PHP interpreter, Apache webserver, and required tools and extensions. It uses the `container.from()` method to initialize a new container from the `php:8.2-apache-buster` image. It then chains multiple `container.withExec()` methods to add tools, PHP extensions and Apache configuration to the image.
 1. The `buildApplicationImage()` method uses the image produced by `buildRuntimeImage()` and executes three additional GraphQL queries:
     - The first query obtains a reference to the source code directory of the application on the host using the `host.directory()` API method.
-    - The next query continues building the image. It uses the `container.withDirectory()` method to mount the source code directory into the container. It then chains multiple `container.withExec()` methods to copy the application source code to the Apache webserver's filesystem, and set various file permissions and environment variables.
+    - The next query continues building the image. It uses the `container.withDirectory()` method to return the container with the source code directory written at `/mnt`. It then chains multiple `container.withExec()` methods to copy the application source code to the Apache webserver's filesystem, and set various file permissions and environment variables.
     - The final query installs Composer in the image and runs `composer install` to download all the required application dependencies.
 
 :::info
@@ -357,7 +357,7 @@ The `runUnitTests()` method executes two GraphQL queries:
 1. The second query uses the test image returned by the `buildTestImage()` method and adds a service binding for the database service to it using the `container.withServiceBinding()` API method. It then chains multiple `container.withEnvVariable()` methods to configure the database service credentials for the Laravel application. Finally, it uses the `container.withExec()` method to launch the PHPUnit test runner and return the output stream (the test summary).
 
 :::tip
-When creating the database service container, using `container.withExposedPort()` is important. Without this method, Dagger will start the service container and immediately allow access to the test runner, without waiting for the service to start listening. This can result in test failures if the test runner is unable to connect to the service. With this method, Dagger will wait for the service to be listening first before allowing the test runner access to it. [Learn more about service containers in Dagger](./757394-use-service-containers.md).
+When creating the database service container, using the `Container.withExposedPort` field is important. Without this field, Dagger will start the service container and immediately allow access to the test runner, without waiting for the service to start listening. This can result in test failures if the test runner is unable to connect to the service. With this field, Dagger will wait for the service to be listening first before allowing the test runner access to it. [Learn more about service containers in Dagger](./757394-use-services.md).
 :::
 
 ### Build a production image

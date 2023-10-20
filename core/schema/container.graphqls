@@ -1,12 +1,19 @@
 extend type Query {
   """
-  Loads a container from ID.
+  Creates a scratch container or loads one by ID.
 
-  Null ID returns an empty container (scratch).
-  Optional platform argument initializes new containers to execute and publish as that platform.
-  Platform defaults to that of the builder's host.
+  Optional platform argument initializes new containers to execute and publish
+  as that platform. Platform defaults to that of the builder's host.
   """
-  container(id: ContainerID, platform: Platform): Container!
+  container(
+    id: ContainerID @deprecated(reason: "Use `loadContainerFromID` instead.")
+    platform: Platform
+  ): Container!
+
+  """
+  Loads a container from an ID.
+  """
+  loadContainerFromID(id: ContainerID!): Container!
 }
 
 "A unique container identifier. Null designates an empty container (scratch)."
@@ -322,7 +329,7 @@ type Container {
     path: String!
 
     "Identifier of the cache volume to mount."
-    cache: CacheID!
+    cache: CacheVolumeID!
 
     "Identifier of the directory to use as the cache volume's root."
     source: DirectoryID
@@ -662,6 +669,33 @@ type Container {
   ): Boolean!
 
   """
+  Returns a File representing the container serialized to a tarball.
+  """
+  asTarball(
+    """
+    Identifiers for other platform specific containers.
+    Used for multi-platform image.
+    """
+    platformVariants: [ContainerID!]
+
+    """
+    Force each layer of the image to use the specified compression algorithm.
+    If this is unset, then if a layer already has a compressed blob in the engine's
+    cache, that will be used (this can result in a mix of compression algorithms for
+    different layers). If this is unset and a layer has no compressed blob in the
+    engine's cache, then it will be compressed using Gzip.
+    """
+    forcedCompression: ImageLayerCompression
+
+    """
+    Use the specified media types for the image's layers. Defaults to OCI, which
+    is largely compatible with most recent container runtimes, but Docker may be needed
+    for older runtimes without OCI support.
+    """
+    mediaTypes: ImageMediaTypes = OCIMediaTypes
+  ): File!
+
+  """
   Reads the container from an OCI tarball.
 
   NOTE: this involves unpacking the tarball to an OCI store on the host at
@@ -717,8 +751,6 @@ type Container {
   Exposed ports serve two purposes:
     - For health checks and introspection, when running services
     - For setting the EXPOSE OCI field when publishing the container
-
-  Currently experimental; set _EXPERIMENTAL_DAGGER_SERVICES_DNS=0 to disable.
   """
   withExposedPort(
     "Port number to expose"
@@ -731,8 +763,6 @@ type Container {
 
   """
   Unexpose a previously exposed port.
-
-  Currently experimental; set _EXPERIMENTAL_DAGGER_SERVICES_DNS=0 to disable.
   """
   withoutExposedPort(
     "Port number to unexpose"
@@ -746,8 +776,6 @@ type Container {
 
   This includes ports already exposed by the image, even if not
   explicitly added with dagger.
-
-  Currently experimental; set _EXPERIMENTAL_DAGGER_SERVICES_DNS=0 to disable.
   """
   exposedPorts: [Port!]!
 
@@ -760,38 +788,21 @@ type Container {
   The service will be reachable from the container via the provided hostname alias.
 
   The service dependency will also convey to any files or directories produced by the container.
-
-  Currently experimental; set _EXPERIMENTAL_DAGGER_SERVICES_DNS=0 to disable.
   """
   withServiceBinding(
     "A name that can be used to reach the service from the container"
     alias: String!
     "Identifier of the service container"
-    service: ContainerID!
+    service: ServiceID!
   ): Container!
 
   """
-  Retrieves a hostname which can be used by clients to reach this container.
+  Return a websocket endpoint that, if connected to, will start the container with a TTY streamed
+  over the websocket.
 
-  Currently experimental; set _EXPERIMENTAL_DAGGER_SERVICES_DNS=0 to disable.
+  Primarily intended for internal use with the dagger CLI.
   """
-  hostname: String!
-
-  """
-  Retrieves an endpoint that clients can use to reach this container.
-
-  If no port is specified, the first exposed port is used. If none exist an error is returned.
-
-  If a scheme is specified, a URL is returned. Otherwise, a host:port pair is returned.
-
-  Currently experimental; set _EXPERIMENTAL_DAGGER_SERVICES_DNS=0 to disable.
-  """
-  endpoint(
-    "The exposed port number for the endpoint"
-    port: Int
-    "Return a URL with the given scheme, eg. http for http://"
-    scheme: String
-  ): String!
+  shellEndpoint: String!
 }
 
 "A simple key value object that represents an environment variable."

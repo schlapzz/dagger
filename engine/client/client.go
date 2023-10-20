@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -17,8 +18,10 @@ import (
 	"sync"
 	"time"
 
+	"dagger.io/dagger"
 	"github.com/Khan/genqlient/graphql"
 	"github.com/cenkalti/backoff/v4"
+
 	"github.com/docker/cli/cli/config"
 	"github.com/google/uuid"
 	controlapi "github.com/moby/buildkit/api/services/control"
@@ -28,6 +31,7 @@ import (
 	"github.com/moby/buildkit/session/auth/authprovider"
 	"github.com/moby/buildkit/session/filesync"
 	"github.com/moby/buildkit/session/grpchijack"
+	"github.com/opencontainers/go-digest"
 	"github.com/tonistiigi/fsutil"
 	fstypes "github.com/tonistiigi/fsutil/types"
 	"github.com/vito/progrock"
@@ -36,6 +40,7 @@ import (
 
 	"github.com/dagger/dagger/core/pipeline"
 	"github.com/dagger/dagger/engine"
+	"github.com/dagger/dagger/engine/session"
 	"github.com/dagger/dagger/telemetry"
 )
 
@@ -61,6 +66,10 @@ type Params struct {
 	ProgrockWriter     progrock.Writer
 	EngineNameCallback func(string)
 	CloudURLCallback   func(string)
+
+	// TODO: doc if this stays in
+	ModuleDigest          digest.Digest
+	FunctionContextDigest digest.Digest
 }
 
 type Client struct {
@@ -75,10 +84,16 @@ type Client struct {
 
 	Recorder *progrock.Recorder
 
-	httpClient           *http.Client
-	bkClient             *bkclient.Client
-	bkSession            *bksession.Session
-	upstreamCacheOptions []*controlapi.CacheOptionsEntry
+	httpClient *http.Client
+	bkClient   *bkclient.Client
+	bkSession  *bksession.Session
+
+	// A client for the dagger API that is directly hooked up to this engine client.
+	// Currently used for the dagger CLI so it can avoid making a subprocess of itself...
+	daggerClient *dagger.Client
+
+	upstreamCacheImportOptions []*controlapi.CacheOptionsEntry
+	upstreamCacheExportOptions []*controlapi.CacheOptionsEntry
 
 	hostname string
 
@@ -138,9 +153,12 @@ func Connect(ctx context.Context, params Params) (_ *Client, _ context.Context, 
 		c.SecretToken = os.Getenv("DAGGER_SESSION_TOKEN")
 		c.httpClient = &http.Client{
 			Transport: &http.Transport{
-				DialContext:       c.NestedDialContext,
+				DialContext:       c.DialContext,
 				DisableKeepAlives: true,
 			},
+		}
+		if err := c.daggerConnect(ctx); err != nil {
+			return nil, nil, fmt.Errorf("failed to connect to dagger: %w", err)
 		}
 		return c, ctx, nil
 	}
@@ -156,15 +174,10 @@ func Connect(ctx context.Context, params Params) (_ *Client, _ context.Context, 
 	// Note that this is not the cache service support in engine/cache/, that
 	// is a different feature which is configured in the engine daemon.
 
-	cacheConfigType, cacheConfigAttrs, err := cacheConfigFromEnv()
+	var err error
+	c.upstreamCacheImportOptions, c.upstreamCacheExportOptions, err = allCacheConfigsFromEnv()
 	if err != nil {
 		return nil, nil, fmt.Errorf("cache config from env: %w", err)
-	}
-	if cacheConfigType != "" {
-		c.upstreamCacheOptions = []*controlapi.CacheOptionsEntry{{
-			Type:  cacheConfigType,
-			Attrs: cacheConfigAttrs,
-		}}
 	}
 
 	remote, err := url.Parse(c.RunnerHost)
@@ -173,7 +186,7 @@ func Connect(ctx context.Context, params Params) (_ *Client, _ context.Context, 
 	}
 
 	engineTask := loader.Task("starting engine")
-	bkClient, err := newBuildkitClient(ctx, remote, c.UserAgent)
+	bkClient, bkInfo, err := newBuildkitClient(ctx, remote, c.UserAgent, loader)
 	engineTask.Done(err)
 	if err != nil {
 		return nil, nil, fmt.Errorf("new client: %w", err)
@@ -187,11 +200,7 @@ func Connect(ctx context.Context, params Params) (_ *Client, _ context.Context, 
 	}()
 
 	if c.EngineNameCallback != nil {
-		info, err := c.bkClient.Info(ctx)
-		if err != nil {
-			return nil, nil, fmt.Errorf("get info: %w", err)
-		}
-		engineName := fmt.Sprintf("%s (version %s)", info.BuildkitVersion.Package, info.BuildkitVersion.Version)
+		engineName := fmt.Sprintf("%s (version %s)", bkInfo.BuildkitVersion.Revision, bkInfo.BuildkitVersion.Version)
 		c.EngineNameCallback(engineName)
 	}
 
@@ -224,12 +233,14 @@ func Connect(ctx context.Context, params Params) (_ *Client, _ context.Context, 
 	c.labels = append(c.labels, pipeline.LoadClientLabels(engine.Version)...)
 
 	c.internalCtx = engine.ContextWithClientMetadata(c.internalCtx, &engine.ClientMetadata{
-		ClientID:          c.ID(),
-		ClientSecretToken: c.SecretToken,
-		ServerID:          c.ServerID,
-		ClientHostname:    c.hostname,
-		Labels:            c.labels,
-		ParentClientIDs:   c.ParentClientIDs,
+		ClientID:              c.ID(),
+		ClientSecretToken:     c.SecretToken,
+		ServerID:              c.ServerID,
+		ClientHostname:        c.hostname,
+		Labels:                c.labels,
+		ParentClientIDs:       c.ParentClientIDs,
+		ModuleDigest:          c.ModuleDigest,
+		FunctionContextDigest: c.FunctionContextDigest,
 	})
 
 	// progress
@@ -249,19 +260,26 @@ func Connect(ctx context.Context, params Params) (_ *Client, _ context.Context, 
 	// registry auth
 	bkSession.Allow(authprovider.NewDockerAuthProvider(config.LoadDefaultConfigFile(os.Stderr), nil))
 
+	// host=>container networking
+	c.Recorder = progrock.NewRecorder(progMultiW)
+	bkSession.Allow(session.NewTunnelListenerAttachable(c.Recorder))
+	ctx = progrock.ToContext(ctx, c.Recorder)
+
 	// connect to the server, registering our session attachables and starting the server if not
 	// already started
 	c.eg.Go(func() error {
 		return bkSession.Run(c.internalCtx, func(ctx context.Context, proto string, meta map[string][]string) (net.Conn, error) {
 			return grpchijack.Dialer(c.bkClient.ControlClient())(ctx, proto, engine.ClientMetadata{
-				RegisterClient:      true,
-				ClientID:            c.ID(),
-				ClientSecretToken:   c.SecretToken,
-				ServerID:            c.ServerID,
-				ParentClientIDs:     c.ParentClientIDs,
-				ClientHostname:      hostname,
-				UpstreamCacheConfig: c.upstreamCacheOptions,
-				Labels:              c.labels,
+				RegisterClient:            true,
+				ClientID:                  c.ID(),
+				ClientSecretToken:         c.SecretToken,
+				ServerID:                  c.ServerID,
+				ParentClientIDs:           c.ParentClientIDs,
+				ClientHostname:            hostname,
+				UpstreamCacheImportConfig: c.upstreamCacheImportOptions,
+				Labels:                    c.labels,
+				ModuleDigest:              c.ModuleDigest,
+				FunctionContextDigest:     c.FunctionContextDigest,
 			}.AppendToMD(meta))
 		})
 	})
@@ -280,12 +298,21 @@ func Connect(ctx context.Context, params Params) (_ *Client, _ context.Context, 
 	connectRetryCtx, connectRetryCancel := context.WithTimeout(ctx, 300*time.Second)
 	defer connectRetryCancel()
 	err = backoff.Retry(func() error {
-		ctx, cancel := context.WithTimeout(connectRetryCtx, bo.NextBackOff())
+		nextBackoff := bo.NextBackOff()
+		ctx, cancel := context.WithTimeout(connectRetryCtx, nextBackoff)
 		defer cancel()
+
 		innerErr := c.Do(ctx, `{defaultPlatform}`, "", nil, nil)
 		if innerErr != nil {
-			c.Recorder.Debug("Failed to connect; retrying...", progrock.ErrorLabel(innerErr))
+			// only show errors once the time between attempts exceeds this threshold, otherwise common
+			// cases of 1 or 2 retries become too noisy
+			if nextBackoff > time.Second {
+				fmt.Fprintln(loader.Stdout(), "Failed to connect; retrying...", progrock.ErrorLabel(innerErr))
+			}
+		} else {
+			fmt.Fprintln(loader.Stdout(), "OK!")
 		}
+
 		return innerErr
 	}, backoff.WithContext(bo, connectRetryCtx))
 
@@ -299,7 +326,19 @@ func Connect(ctx context.Context, params Params) (_ *Client, _ context.Context, 
 		c.CloudURLCallback(cloudURL)
 	}
 
+	if err := c.daggerConnect(ctx); err != nil {
+		return nil, nil, fmt.Errorf("failed to connect to dagger: %w", err)
+	}
+
 	return c, ctx, nil
+}
+
+func (c *Client) daggerConnect(ctx context.Context) error {
+	var err error
+	c.daggerClient, err = dagger.Connect(context.Background(),
+		dagger.WithConn(EngineConn(c)),
+		dagger.WithSkipCompatibilityCheck())
+	return err
 }
 
 func (c *Client) Close() (rerr error) {
@@ -318,12 +357,12 @@ func (c *Client) Close() (rerr error) {
 	default:
 	}
 
-	if len(c.upstreamCacheOptions) > 0 {
+	if len(c.upstreamCacheExportOptions) > 0 {
 		cacheExportCtx, cacheExportCancel := context.WithTimeout(c.internalCtx, 600*time.Second)
 		defer cacheExportCancel()
 		_, err := c.bkClient.ControlClient().Solve(cacheExportCtx, &controlapi.SolveRequest{
 			Cache: controlapi.CacheOptions{
-				Exports: c.upstreamCacheOptions,
+				Exports: c.upstreamCacheExportOptions,
 			},
 		})
 		rerr = errors.Join(rerr, err)
@@ -333,6 +372,10 @@ func (c *Client) Close() (rerr error) {
 
 	if c.internalCancel != nil {
 		c.internalCancel()
+	}
+
+	if c.daggerClient != nil {
+		c.eg.Go(c.daggerClient.Close)
 	}
 
 	if c.httpClient != nil {
@@ -404,45 +447,36 @@ func (c *Client) ID() string {
 	return c.bkSession.ID()
 }
 
-func (c *Client) DialContext(ctx context.Context, _, _ string) (net.Conn, error) {
+func (c *Client) DialContext(ctx context.Context, _, _ string) (conn net.Conn, err error) {
 	// NOTE: the context given to grpchijack.Dialer is for the lifetime of the stream.
 	// If http connection re-use is enabled, that can be far past this DialContext call.
 	ctx, cancel, err := c.withClientCloseCancel(ctx)
 	if err != nil {
 		return nil, err
 	}
-	conn, err := grpchijack.Dialer(c.bkClient.ControlClient())(ctx, "", engine.ClientMetadata{
-		ClientID:          c.ID(),
-		ClientSecretToken: c.SecretToken,
-		ServerID:          c.ServerID,
-		ClientHostname:    c.hostname,
-		ParentClientIDs:   c.ParentClientIDs,
-		Labels:            c.labels,
-	}.ToGRPCMD())
-	if err != nil {
-		return nil, err
-	}
-	go func() {
-		<-c.closeCtx.Done()
-		cancel()
-		conn.Close()
-	}()
-	return conn, nil
-}
 
-func (c *Client) NestedDialContext(ctx context.Context, _, _ string) (net.Conn, error) {
-	ctx, cancel, err := c.withClientCloseCancel(ctx)
+	isNestedSession := c.nestedSessionPort != 0
+	if isNestedSession {
+		conn, err = (&net.Dialer{
+			Cancel:    ctx.Done(),
+			KeepAlive: -1, // disable for now
+		}).Dial("tcp", "127.0.0.1:"+strconv.Itoa(c.nestedSessionPort))
+	} else {
+		conn, err = grpchijack.Dialer(c.bkClient.ControlClient())(ctx, "", engine.ClientMetadata{
+			ClientID:              c.ID(),
+			ClientSecretToken:     c.SecretToken,
+			ServerID:              c.ServerID,
+			ClientHostname:        c.hostname,
+			ParentClientIDs:       c.ParentClientIDs,
+			Labels:                c.labels,
+			ModuleDigest:          c.ModuleDigest,
+			FunctionContextDigest: c.FunctionContextDigest,
+		}.ToGRPCMD())
+	}
 	if err != nil {
 		return nil, err
 	}
 
-	conn, err := (&net.Dialer{
-		Cancel:    ctx.Done(),
-		KeepAlive: -1, // disable for now
-	}).Dial("tcp", "127.0.0.1:"+strconv.Itoa(c.nestedSessionPort))
-	if err != nil {
-		return nil, err
-	}
 	go func() {
 		<-c.closeCtx.Done()
 		cancel()
@@ -521,7 +555,7 @@ func (c *Client) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	resp, err := c.httpClient.Do(&http.Request{
+	proxyReq := &http.Request{
 		Method: r.Method,
 		URL: &url.URL{
 			Scheme: "http",
@@ -530,7 +564,9 @@ func (c *Client) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		},
 		Header: r.Header,
 		Body:   r.Body,
-	})
+	}
+	proxyReq = proxyReq.WithContext(ctx)
+	resp, err := c.httpClient.Do(proxyReq)
 	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
 		w.Write([]byte("http do: " + err.Error()))
@@ -545,6 +581,11 @@ func (c *Client) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		panic(err) // don't write header because we already wrote to the body, which isn't allowed
 	}
+}
+
+// A client to the Dagger API hooked up directly with this engine client.
+func (c *Client) Dagger() *dagger.Client {
+	return c.daggerClient
 }
 
 // Local dir imports
@@ -701,34 +742,82 @@ func (a progRockAttachable) Register(srv *grpc.Server) {
 }
 
 const (
+	// cache configs that should be applied to be import and export
 	cacheConfigEnvName = "_EXPERIMENTAL_DAGGER_CACHE_CONFIG"
+	// cache configs for imports only
+	cacheImportsConfigEnvName = "_EXPERIMENTAL_DAGGER_CACHE_IMPORT_CONFIG"
+	// cache configs for exports only
+	cacheExportsConfigEnvName = "_EXPERIMENTAL_DAGGER_CACHE_EXPORT_CONFIG"
 )
 
-func cacheConfigFromEnv() (string, map[string]string, error) {
-	envVal, ok := os.LookupEnv(cacheConfigEnvName)
+// env is in form k1=v1,k2=v2;k3=v3... with ';' used to separate multiple cache configs.
+// any value that itself needs ';' can use '\;' to escape it.
+func cacheConfigFromEnv(envName string) ([]*controlapi.CacheOptionsEntry, error) {
+	envVal, ok := os.LookupEnv(envName)
 	if !ok {
-		return "", nil, nil
+		return nil, nil
+	}
+	configKVs := strings.Split(envVal, ";")
+	// handle '\;' as an escape in case ';' needs to be used in a cache config setting rather than as
+	// a delimiter between multiple cache configs
+	for i := len(configKVs) - 2; i >= 0; i-- {
+		if strings.HasSuffix(configKVs[i], `\`) {
+			configKVs[i] = configKVs[i][:len(configKVs[i])-1] + ";" + configKVs[i+1]
+			configKVs = append(configKVs[:i+1], configKVs[i+2:]...)
+		}
 	}
 
-	// env is in form k1=v1,k2=v2,...
-	kvs := strings.Split(envVal, ",")
-	if len(kvs) == 0 {
-		return "", nil, nil
-	}
-	attrs := make(map[string]string)
-	for _, kv := range kvs {
-		parts := strings.SplitN(kv, "=", 2)
-		if len(parts) != 2 {
-			return "", nil, fmt.Errorf("invalid form for cache config %q", kv)
+	cacheConfigs := make([]*controlapi.CacheOptionsEntry, 0, len(configKVs))
+	for _, kvsStr := range configKVs {
+		kvs := strings.Split(kvsStr, ",")
+		if len(kvs) == 0 {
+			continue
 		}
-		attrs[parts[0]] = parts[1]
+		attrs := make(map[string]string)
+		for _, kv := range kvs {
+			parts := strings.SplitN(kv, "=", 2)
+			if len(parts) != 2 {
+				return nil, fmt.Errorf("invalid form for cache config %q", kv)
+			}
+			attrs[parts[0]] = parts[1]
+		}
+		typeVal, ok := attrs["type"]
+		if !ok {
+			return nil, fmt.Errorf("missing type in cache config: %q", envVal)
+		}
+		delete(attrs, "type")
+		cacheConfigs = append(cacheConfigs, &controlapi.CacheOptionsEntry{
+			Type:  typeVal,
+			Attrs: attrs,
+		})
 	}
-	typeVal, ok := attrs["type"]
-	if !ok {
-		return "", nil, fmt.Errorf("missing type in cache config: %q", envVal)
+	return cacheConfigs, nil
+}
+
+func allCacheConfigsFromEnv() (cacheImportConfigs []*controlapi.CacheOptionsEntry, cacheExportConfigs []*controlapi.CacheOptionsEntry, rerr error) {
+	// cache import only configs
+	cacheImportConfigs, err := cacheConfigFromEnv(cacheImportsConfigEnvName)
+	if err != nil {
+		return nil, nil, fmt.Errorf("cache import config from env: %w", err)
 	}
-	delete(attrs, "type")
-	return typeVal, attrs, nil
+
+	// cache export only configs
+	cacheExportConfigs, err = cacheConfigFromEnv(cacheExportsConfigEnvName)
+	if err != nil {
+		return nil, nil, fmt.Errorf("cache export config from env: %w", err)
+	}
+
+	// this env sets configs for both imports and exports
+	cacheConfigs, err := cacheConfigFromEnv(cacheConfigEnvName)
+	if err != nil {
+		return nil, nil, fmt.Errorf("cache config from env: %w", err)
+	}
+	for _, cfg := range cacheConfigs {
+		cacheImportConfigs = append(cacheImportConfigs, cfg)
+		cacheExportConfigs = append(cacheExportConfigs, cfg)
+	}
+
+	return cacheImportConfigs, cacheExportConfigs, nil
 }
 
 type doerWithHeaders struct {
@@ -741,4 +830,27 @@ func (d doerWithHeaders) Do(req *http.Request) (*http.Response, error) {
 		req.Header[k] = v
 	}
 	return d.inner.Do(req)
+}
+
+func EngineConn(engineClient *Client) DirectConn {
+	return func(req *http.Request) (*http.Response, error) {
+		req.SetBasicAuth(engineClient.SecretToken, "")
+		resp := httptest.NewRecorder()
+		engineClient.ServeHTTP(resp, req)
+		return resp.Result(), nil
+	}
+}
+
+type DirectConn func(*http.Request) (*http.Response, error)
+
+func (f DirectConn) Do(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+func (f DirectConn) Host() string {
+	return ":mem:"
+}
+
+func (f DirectConn) Close() error {
+	return nil
 }

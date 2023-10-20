@@ -21,26 +21,20 @@ func (s *socketSchema) Schema() string {
 	return Socket
 }
 
-var socketIDResolver = stringResolver(socket.ID(""))
-
 func (s *socketSchema) Resolvers() Resolvers {
-	return Resolvers{
-		"SocketID": socketIDResolver,
+	rs := Resolvers{
 		"Query": ObjectResolver{
 			"socket": ToResolver(s.socket),
 		},
-		"Socket": ObjectResolver{
-			"id": ToResolver(s.id),
-		},
 	}
+
+	ResolveIDable[socket.Socket](rs, "Socket", ObjectResolver{})
+
+	return rs
 }
 
 func (s *socketSchema) Dependencies() []ExecutableSchema {
 	return nil
-}
-
-func (s *socketSchema) id(ctx *core.Context, parent *socket.Socket, args any) (socket.ID, error) {
-	return parent.ID()
 }
 
 type socketArgs struct {
@@ -49,5 +43,5 @@ type socketArgs struct {
 
 // nolint: unparam
 func (s *socketSchema) socket(_ *core.Context, _ any, args socketArgs) (*socket.Socket, error) {
-	return args.ID.ToSocket()
+	return args.ID.Decode()
 }

@@ -18,28 +18,23 @@ func (s *secretSchema) Schema() string {
 	return Secret
 }
 
-var secretIDResolver = stringResolver(core.SecretID(""))
-
 func (s *secretSchema) Resolvers() Resolvers {
-	return Resolvers{
-		"SecretID": secretIDResolver,
+	rs := Resolvers{
 		"Query": ObjectResolver{
 			"secret":    ToResolver(s.secret),
 			"setSecret": ToResolver(s.setSecret),
 		},
-		"Secret": ObjectResolver{
-			"id":        ToResolver(s.id),
-			"plaintext": ToResolver(s.plaintext),
-		},
 	}
+
+	ResolveIDable[core.Secret](rs, "Secret", ObjectResolver{
+		"plaintext": ToResolver(s.plaintext),
+	})
+
+	return rs
 }
 
 func (s *secretSchema) Dependencies() []ExecutableSchema {
 	return nil
-}
-
-func (s *secretSchema) id(ctx *core.Context, parent *core.Secret, args any) (core.SecretID, error) {
-	return parent.ID()
 }
 
 type secretArgs struct {
@@ -47,7 +42,7 @@ type secretArgs struct {
 }
 
 func (s *secretSchema) secret(ctx *core.Context, parent any, args secretArgs) (*core.Secret, error) {
-	return args.ID.ToSecret()
+	return args.ID.Decode()
 }
 
 type SecretPlaintext string
@@ -68,7 +63,7 @@ func (s *secretSchema) setSecret(ctx *core.Context, parent any, args setSecretAr
 		return nil, err
 	}
 
-	return secretID.ToSecret()
+	return secretID.Decode()
 }
 
 func (s *secretSchema) plaintext(ctx *core.Context, parent *core.Secret, args any) (string, error) {

@@ -26,33 +26,32 @@ func (s *directorySchema) Schema() string {
 	return Directory
 }
 
-var directoryIDResolver = stringResolver(core.DirectoryID(""))
-
 func (s *directorySchema) Resolvers() Resolvers {
-	return Resolvers{
-		"DirectoryID": directoryIDResolver,
+	rs := Resolvers{
 		"Query": ObjectResolver{
 			"directory": ToResolver(s.directory),
 		},
-		"Directory": ToIDableObjectResolver(core.DirectoryID.ToDirectory, ObjectResolver{
-			"id":               ToResolver(s.id),
-			"sync":             ToResolver(s.sync),
-			"pipeline":         ToResolver(s.pipeline),
-			"entries":          ToResolver(s.entries),
-			"file":             ToResolver(s.file),
-			"withFile":         ToResolver(s.withFile),
-			"withNewFile":      ToResolver(s.withNewFile),
-			"withoutFile":      ToResolver(s.withoutFile),
-			"directory":        ToResolver(s.subdirectory),
-			"withDirectory":    ToResolver(s.withDirectory),
-			"withTimestamps":   ToResolver(s.withTimestamps),
-			"withNewDirectory": ToResolver(s.withNewDirectory),
-			"withoutDirectory": ToResolver(s.withoutDirectory),
-			"diff":             ToResolver(s.diff),
-			"export":           ToResolver(s.export),
-			"dockerBuild":      ToResolver(s.dockerBuild),
-		}),
 	}
+
+	ResolveIDable[core.Directory](rs, "Directory", ObjectResolver{
+		"sync":             ToResolver(s.sync),
+		"pipeline":         ToResolver(s.pipeline),
+		"entries":          ToResolver(s.entries),
+		"file":             ToResolver(s.file),
+		"withFile":         ToResolver(s.withFile),
+		"withNewFile":      ToResolver(s.withNewFile),
+		"withoutFile":      ToResolver(s.withoutFile),
+		"directory":        ToResolver(s.subdirectory),
+		"withDirectory":    ToResolver(s.withDirectory),
+		"withTimestamps":   ToResolver(s.withTimestamps),
+		"withNewDirectory": ToResolver(s.withNewDirectory),
+		"withoutDirectory": ToResolver(s.withoutDirectory),
+		"diff":             ToResolver(s.diff),
+		"export":           ToResolver(s.export),
+		"dockerBuild":      ToResolver(s.dockerBuild),
+	})
+
+	return rs
 }
 
 func (s *directorySchema) Dependencies() []ExecutableSchema {
@@ -75,18 +74,14 @@ type directoryArgs struct {
 
 func (s *directorySchema) directory(ctx *core.Context, parent *core.Query, args directoryArgs) (*core.Directory, error) {
 	if args.ID != "" {
-		return args.ID.ToDirectory()
+		return args.ID.Decode()
 	}
 	platform := s.platform
 	return core.NewScratchDirectory(parent.PipelinePath(), platform), nil
 }
 
-func (s *directorySchema) id(ctx *core.Context, parent *core.Directory, args any) (core.DirectoryID, error) {
-	return parent.ID()
-}
-
 func (s *directorySchema) sync(ctx *core.Context, parent *core.Directory, _ any) (core.DirectoryID, error) {
-	err := parent.Evaluate(ctx.Context, s.bk, s.svcs)
+	_, err := parent.Evaluate(ctx.Context, s.bk, s.svcs)
 	if err != nil {
 		return "", err
 	}
@@ -118,7 +113,7 @@ type withDirectoryArgs struct {
 }
 
 func (s *directorySchema) withDirectory(ctx *core.Context, parent *core.Directory, args withDirectoryArgs) (*core.Directory, error) {
-	dir, err := args.Directory.ToDirectory()
+	dir, err := args.Directory.Decode()
 	if err != nil {
 		return nil, err
 	}
@@ -166,7 +161,7 @@ type withFileArgs struct {
 }
 
 func (s *directorySchema) withFile(ctx *core.Context, parent *core.Directory, args withFileArgs) (*core.Directory, error) {
-	file, err := args.Source.ToFile()
+	file, err := args.Source.Decode()
 	if err != nil {
 		return nil, err
 	}
@@ -195,7 +190,7 @@ type diffArgs struct {
 }
 
 func (s *directorySchema) diff(ctx *core.Context, parent *core.Directory, args diffArgs) (*core.Directory, error) {
-	dir, err := args.Other.ToDirectory()
+	dir, err := args.Other.Decode()
 	if err != nil {
 		return nil, err
 	}
