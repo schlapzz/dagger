@@ -48,6 +48,9 @@ type Container struct {
 	// Image configuration (env, workdir, etc)
 	Config specs.ImageConfig `json:"cfg"`
 
+	// List of GPU devices that will be exposed to the container
+	EnabledGPUs []string `json:"enabledGPUs,omitempty"`
+
 	// Pipeline
 	Pipeline pipeline.Path `json:"pipeline"`
 
@@ -1012,6 +1015,16 @@ func (container *Container) WithPipeline(ctx context.Context, name, description 
 	return container, nil
 }
 
+type ContainerGPUOpts struct {
+	Devices []string `json:"devices"`
+}
+
+func (container *Container) WithGPU(ctx context.Context, gpuOpts ContainerGPUOpts) (*Container, error) {
+	container = container.Clone()
+	container.EnabledGPUs = gpuOpts.Devices
+	return container, nil
+}
+
 func (container *Container) WithExec(ctx context.Context, bk *buildkit.Client, progSock string, defaultPlatform specs.Platform, opts ContainerExecOpts) (*Container, error) { //nolint:gocyclo
 	container = container.Clone()
 
@@ -1044,8 +1057,12 @@ func (container *Container) WithExec(ctx context.Context, bk *buildkit.Client, p
 		runOpts = append(runOpts, llb.AddEnv("_DAGGER_ENABLE_NESTING", ""))
 	}
 
-	if opts.CacheExitCode != 0 {
-		runOpts = append(runOpts, llb.AddEnv("_DAGGER_CACHE_EXIT_CODE", strconv.FormatUint(uint64(opts.CacheExitCode), 10)))
+	if opts.ModuleContextDigest != "" {
+		runOpts = append(runOpts, llb.AddEnv("_DAGGER_MODULE_CONTEXT_DIGEST", opts.ModuleContextDigest.String()))
+	}
+
+	if opts.NestedInSameSession {
+		runOpts = append(runOpts, llb.AddEnv("_DAGGER_ENABLE_NESTING_IN_SAME_SESSION", ""))
 	}
 
 	metaSt, metaSourcePath := metaMount(opts.Stdin)
@@ -1085,12 +1102,26 @@ func (container *Container) WithExec(ctx context.Context, bk *buildkit.Client, p
 			_ = ok
 		}
 
+		// don't pass these through to the container when manually set, they are internal only
 		if name == "_DAGGER_ENABLE_NESTING" && !opts.ExperimentalPrivilegedNesting {
-			// don't pass this through to the container when manually set, this is internal only
+			continue
+		}
+		if name == "_DAGGER_MODULE_CONTEXT_DIGEST" && opts.ModuleContextDigest == "" {
+			continue
+		}
+		if name == "_DAGGER_ENABLE_NESTING_IN_SAME_SESSION" && !opts.NestedInSameSession {
 			continue
 		}
 
 		runOpts = append(runOpts, llb.AddEnv(name, val))
+	}
+
+	// if GPU parameters are set for this container pass them over:
+	if len(container.EnabledGPUs) > 0 {
+		if gpuSupportEnabled := os.Getenv("_EXPERIMENTAL_DAGGER_GPU_SUPPORT"); gpuSupportEnabled == "" {
+			return nil, fmt.Errorf("GPU support is not enabled, set _EXPERIMENTAL_DAGGER_GPU_SUPPORT")
+		}
+		runOpts = append(runOpts, llb.AddEnv("_EXPERIMENTAL_DAGGER_GPU_PARAMS", strings.Join(container.EnabledGPUs, ",")))
 	}
 
 	secretsToScrub := SecretToScrubInfo{}
@@ -1847,10 +1878,14 @@ type ContainerExecOpts struct {
 	// Grant the process all root capabilities
 	InsecureRootCapabilities bool
 
-	// (Internal-only for now) An exit code that will be caught by the shim, written to
-	// the exec meta mount, but then result in the shim still exiting with 0 so that
-	// the exec is cached.
-	CacheExitCode uint32
+	// (Internal-only) If this exec is for a module function, this digest will be set in the
+	// grpc context metadata for any api requests back to the engine. It's used by the API
+	// server to determine which schema to serve and other module context metadata.
+	ModuleContextDigest digest.Digest
+
+	// (Internal-only) Used for module function execs to trigger the nested api client to
+	// be connected back to the same session.
+	NestedInSameSession bool
 }
 
 type BuildArg struct {

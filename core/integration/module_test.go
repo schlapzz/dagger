@@ -3,8 +3,10 @@ package core
 import (
 	"context"
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"go/format"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -13,9 +15,12 @@ import (
 	"time"
 
 	"dagger.io/dagger"
+	"github.com/dagger/dagger/core/modules"
 	"github.com/iancoleman/strcase"
 	"github.com/moby/buildkit/identity"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
+	"golang.org/x/sync/errgroup"
 )
 
 /* TODO: add coverage for
@@ -39,13 +44,32 @@ func TestModuleGoInit(t *testing.T) {
 		logGen(ctx, t, modGen.Directory("."))
 
 		out, err := modGen.
-			With(daggerQuery(`{bare{myFunction(stringArg:"hello"){stdout}}}`)).
+			With(daggerQuery(`{bare{containerEcho(stringArg:"hello"){stdout}}}`)).
 			Stdout(ctx)
 		require.NoError(t, err)
-		require.JSONEq(t, `{"bare":{"myFunction":{"stdout":"hello\n"}}}`, out)
+		require.JSONEq(t, `{"bare":{"containerEcho":{"stdout":"hello\n"}}}`, out)
 	})
 
-	t.Run("kebab-cases Go module name, camel-cases Dagger module name", func(t *testing.T) {
+	t.Run("reserved go.mod name", func(t *testing.T) {
+		t.Parallel()
+
+		c, ctx := connect(t)
+
+		modGen := c.Container().From(golangImage).
+			WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+			WithWorkdir("/work").
+			With(daggerExec("mod", "init", "--name=go", "--sdk=go"))
+
+		logGen(ctx, t, modGen.Directory("."))
+
+		out, err := modGen.
+			With(daggerQuery(`{go{containerEcho(stringArg:"hello"){stdout}}}`)).
+			Stdout(ctx)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"go":{"containerEcho":{"stdout":"hello\n"}}}`, out)
+	})
+
+	t.Run("uses expected Go module name, camel-cases Dagger module name", func(t *testing.T) {
 		t.Parallel()
 
 		c, ctx := connect(t)
@@ -58,14 +82,14 @@ func TestModuleGoInit(t *testing.T) {
 		logGen(ctx, t, modGen.Directory("."))
 
 		out, err := modGen.
-			With(daggerQuery(`{myModule{myFunction(stringArg:"hello"){stdout}}}`)).
+			With(daggerQuery(`{myModule{containerEcho(stringArg:"hello"){stdout}}}`)).
 			Stdout(ctx)
 		require.NoError(t, err)
-		require.JSONEq(t, `{"myModule":{"myFunction":{"stdout":"hello\n"}}}`, out)
+		require.JSONEq(t, `{"myModule":{"containerEcho":{"stdout":"hello\n"}}}`, out)
 
 		generated, err := modGen.File("go.mod").Contents(ctx)
 		require.NoError(t, err)
-		require.Contains(t, generated, "module my-module")
+		require.Contains(t, generated, "module main")
 	})
 
 	t.Run("creates go.mod beneath an existing go.mod if root points beneath it", func(t *testing.T) {
@@ -88,15 +112,15 @@ func TestModuleGoInit(t *testing.T) {
 		logGen(ctx, t, modGen.Directory("."))
 
 		out, err := modGen.
-			With(daggerQuery(`{beneathGoMod{myFunction(stringArg:"hello"){stdout}}}`)).
+			With(daggerQuery(`{beneathGoMod{containerEcho(stringArg:"hello"){stdout}}}`)).
 			Stdout(ctx)
 		require.NoError(t, err)
-		require.JSONEq(t, `{"beneathGoMod":{"myFunction":{"stdout":"hello\n"}}}`, out)
+		require.JSONEq(t, `{"beneathGoMod":{"containerEcho":{"stdout":"hello\n"}}}`, out)
 
 		t.Run("names Go module after Dagger module", func(t *testing.T) {
 			generated, err := modGen.File("go.mod").Contents(ctx)
 			require.NoError(t, err)
-			require.Contains(t, generated, "module beneath-go-mod")
+			require.Contains(t, generated, "module main")
 		})
 	})
 
@@ -114,10 +138,10 @@ func TestModuleGoInit(t *testing.T) {
 		logGen(ctx, t, modGen.Directory("."))
 
 		out, err := modGen.
-			With(daggerQuery(`{hasGoMod{myFunction(stringArg:"hello"){stdout}}}`)).
+			With(daggerQuery(`{hasGoMod{containerEcho(stringArg:"hello"){stdout}}}`)).
 			Stdout(ctx)
 		require.NoError(t, err)
-		require.JSONEq(t, `{"hasGoMod":{"myFunction":{"stdout":"hello\n"}}}`, out)
+		require.JSONEq(t, `{"hasGoMod":{"containerEcho":{"stdout":"hello\n"}}}`, out)
 
 		t.Run("preserves module name", func(t *testing.T) {
 			generated, err := modGen.File("go.mod").Contents(ctx)
@@ -324,35 +348,125 @@ func (m *HasNotMainGo) Hello() string { return "Hello, world!" }
 	})
 }
 
-func TestModuleGoGit(t *testing.T) {
+func TestModuleInitLICENSE(t *testing.T) {
+	t.Run("bootstraps Apache-2.0 LICENSE file if none found", func(t *testing.T) {
+		t.Parallel()
+
+		c, ctx := connect(t)
+
+		modGen := c.Container().From(golangImage).
+			WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+			WithWorkdir("/work").
+			With(daggerExec("mod", "init", "--name=licensed-to-ill", "--sdk=go"))
+
+		content, err := modGen.File("LICENSE").Contents(ctx)
+		require.NoError(t, err)
+		require.Contains(t, content, "Apache License, Version 2.0")
+	})
+
+	t.Run("creates LICENSE file in the directory specified by -m", func(t *testing.T) {
+		t.Parallel()
+
+		c, ctx := connect(t)
+
+		modGen := c.Container().From(golangImage).
+			WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+			WithWorkdir("/work").
+			With(daggerExec("mod", "init", "-m", "./mymod", "--name=licensed-to-ill", "--sdk=go"))
+
+		content, err := modGen.File("mymod/LICENSE").Contents(ctx)
+		require.NoError(t, err)
+		require.Contains(t, content, "Apache License, Version 2.0")
+	})
+
+	t.Run("does not bootstrap LICENSE file if it exists in the parent dir", func(t *testing.T) {
+		t.Parallel()
+
+		c, ctx := connect(t)
+
+		modGen := c.Container().From(golangImage).
+			WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+			WithWorkdir("/work").
+			WithNewFile("/work/LICENSE", dagger.ContainerWithNewFileOpts{
+				Contents: "doesnt matter",
+			}).
+			WithWorkdir("/work/sub").
+			With(daggerExec("mod", "init", "--name=licensed-to-ill", "--sdk=go"))
+
+		_, err := modGen.File("LICENSE").Contents(ctx)
+		require.Error(t, err)
+	})
+
+	t.Run("bootstraps a LICENSE file when requested, even if it exists in the parent dir", func(t *testing.T) {
+		t.Parallel()
+
+		c, ctx := connect(t)
+
+		modGen := c.Container().From(golangImage).
+			WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+			WithWorkdir("/work").
+			WithNewFile("/work/LICENSE", dagger.ContainerWithNewFileOpts{
+				Contents: "doesnt matter",
+			}).
+			WithWorkdir("/work/sub").
+			With(daggerExec("mod", "init", "--name=licensed-to-ill", "--sdk=go", "--license=MIT"))
+
+		content, err := modGen.File("LICENSE").Contents(ctx)
+		require.NoError(t, err)
+		require.Contains(t, content, "MIT License")
+	})
+}
+
+func TestModuleGit(t *testing.T) {
 	t.Parallel()
 
-	c, ctx := connect(t)
+	type testCase struct {
+		sdk        string
+		gitignores []string
+	}
+	for _, tc := range []testCase{
+		{
+			sdk: "go",
+			gitignores: []string{
+				"/dagger.gen.go\n",
+				"/querybuilder/\n",
+			},
+		},
+		{
+			sdk: "python",
+			gitignores: []string{
+				"/sdk\n",
+			},
+		},
+	} {
+		tc := tc
+		t.Run(fmt.Sprintf("module %s git", tc.sdk), func(t *testing.T) {
+			t.Parallel()
 
-	modGen := goGitBase(t, c).
-		With(daggerExec("mod", "init", "--name=bare", "--sdk=go"))
+			c, ctx := connect(t)
 
-	logGen(ctx, t, modGen.Directory("."))
+			modGen := goGitBase(t, c).
+				With(daggerExec("mod", "init", "--name=bare", "--sdk="+tc.sdk))
 
-	out, err := modGen.
-		With(daggerQuery(`{bare{myFunction(stringArg:"hello"){stdout}}}`)).
-		Stdout(ctx)
-	require.NoError(t, err)
-	require.JSONEq(t, `{"bare":{"myFunction":{"stdout":"hello\n"}}}`, out)
+			if tc.sdk == "go" {
+				logGen(ctx, t, modGen.Directory("."))
+			}
 
-	t.Run("configures .gitignore", func(t *testing.T) {
-		ignore, err := modGen.File(".gitignore").Contents(ctx)
-		require.NoError(t, err)
-		require.Contains(t, ignore, "/dagger.gen.go\n")
-		require.Contains(t, ignore, "/internal/querybuilder/\n")
-	})
+			out, err := modGen.
+				With(daggerQuery(`{bare{containerEcho(stringArg:"hello"){stdout}}}`)).
+				Stdout(ctx)
+			require.NoError(t, err)
+			require.JSONEq(t, `{"bare":{"containerEcho":{"stdout":"hello\n"}}}`, out)
 
-	t.Run("configures .gitattributes", func(t *testing.T) {
-		t.Skip("it doesn't anymore, since it's .gitignored anyway")
-		attributes, err := modGen.File(".gitattributes").Contents(ctx)
-		require.NoError(t, err)
-		require.Contains(t, attributes, "/dagger.gen.go linguist-generated=true\n")
-	})
+			t.Run("configures .gitignore", func(t *testing.T) {
+				ignore, err := modGen.File(".gitignore").Contents(ctx)
+				require.NoError(t, err)
+				for _, gitignore := range tc.gitignores {
+					require.Contains(t, ignore, gitignore)
+				}
+			})
+		})
+	}
 }
 
 func TestModuleGoGitRemovesIgnored(t *testing.T) {
@@ -364,7 +478,8 @@ func TestModuleGoGitRemovesIgnored(t *testing.T) {
 		With(daggerExec("mod", "init", "--name=bare", "--sdk=go")).
 		WithExec([]string{"rm", ".gitignore"}).
 		// simulate old path scheme to show we ignore it too to help transition
-		WithExec([]string{"cp", "-a", "./internal/querybuilder", "./querybuilder"}).
+		WithExec([]string{"mkdir", "./internal"}).
+		WithExec([]string{"cp", "-a", "./querybuilder", "./internal/querybuilder"}).
 		WithExec([]string{"git", "add", "."}).
 		WithExec([]string{"git", "commit", "-m", "init with generated files"})
 
@@ -380,6 +495,28 @@ func TestModuleGoGitRemovesIgnored(t *testing.T) {
 	require.Contains(t, changedAfterSync, "D  querybuilder/querybuilder.go\n")
 	require.Contains(t, changedAfterSync, "D  internal/querybuilder/marshal.go\n")
 	require.Contains(t, changedAfterSync, "D  internal/querybuilder/querybuilder.go\n")
+}
+
+func TestModulePythonGitRemovesIgnored(t *testing.T) {
+	t.Parallel()
+
+	c, ctx := connect(t)
+
+	committedModGen := goGitBase(t, c).
+		With(daggerExec("mod", "init", "--name=bare", "--sdk=python")).
+		WithExec([]string{"rm", ".gitignore"}).
+		WithExec([]string{"git", "add", "."}).
+		WithExec([]string{"git", "commit", "-m", "init with generated files"})
+
+	changedAfterSync, err := committedModGen.
+		With(daggerExec("mod", "sync")).
+		WithExec([]string{"git", "diff"}). // for debugging
+		WithExec([]string{"git", "status", "--short"}).
+		Stdout(ctx)
+	require.NoError(t, err)
+	t.Logf("changed after sync:\n%s", changedAfterSync)
+	require.Contains(t, changedAfterSync, "D  sdk/pyproject.toml\n")
+	require.Contains(t, changedAfterSync, "D  sdk/src/dagger/__init__.py\n")
 }
 
 //go:embed testdata/modules/go/minimal/main.go
@@ -412,6 +549,64 @@ func TestModuleGoSignatures(t *testing.T) {
 		out, err := modGen.With(daggerQuery(`{minimal{echo(msg: "hello")}}`)).Stdout(ctx)
 		require.NoError(t, err)
 		require.JSONEq(t, `{"minimal":{"echo":"hello...hello...hello..."}}`, out)
+	})
+
+	t.Run("func EchoPointer(*string) string", func(t *testing.T) {
+		t.Parallel()
+		out, err := modGen.With(daggerQuery(`{minimal{echoPointer(msg: "hello")}}`)).Stdout(ctx)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"minimal":{"echoPointer":"hello...hello...hello..."}}`, out)
+	})
+
+	t.Run("func EchoPointerPointer(**string) string", func(t *testing.T) {
+		t.Parallel()
+		out, err := modGen.With(daggerQuery(`{minimal{echoPointerPointer(msg: "hello")}}`)).Stdout(ctx)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"minimal":{"echoPointerPointer":"hello...hello...hello..."}}`, out)
+	})
+
+	t.Run("func EchoOptional(string) string", func(t *testing.T) {
+		t.Parallel()
+		out, err := modGen.With(daggerQuery(`{minimal{echoOptional(msg: "hello")}}`)).Stdout(ctx)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"minimal":{"echoOptional":"hello...hello...hello..."}}`, out)
+		out, err = modGen.With(daggerQuery(`{minimal{echoOptional}}`)).Stdout(ctx)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"minimal":{"echoOptional":"default...default...default..."}}`, out)
+	})
+
+	t.Run("func EchoOptionalPointer(string) string", func(t *testing.T) {
+		t.Parallel()
+		out, err := modGen.With(daggerQuery(`{minimal{echoOptionalPointer(msg: "hello")}}`)).Stdout(ctx)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"minimal":{"echoOptionalPointer":"hello...hello...hello..."}}`, out)
+		out, err = modGen.With(daggerQuery(`{minimal{echoOptionalPointer}}`)).Stdout(ctx)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"minimal":{"echoOptionalPointer":"default...default...default..."}}`, out)
+	})
+
+	t.Run("func EchoOptionalSlice([]string) string", func(t *testing.T) {
+		t.Parallel()
+		out, err := modGen.With(daggerQuery(`{minimal{echoOptionalSlice(msg: ["hello", "there"])}}`)).Stdout(ctx)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"minimal":{"echoOptionalSlice":"hello+there...hello+there...hello+there..."}}`, out)
+		out, err = modGen.With(daggerQuery(`{minimal{echoOptionalSlice}}`)).Stdout(ctx)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"minimal":{"echoOptionalSlice":"foobar...foobar...foobar..."}}`, out)
+	})
+
+	t.Run("func Echoes([]string) []string", func(t *testing.T) {
+		t.Parallel()
+		out, err := modGen.With(daggerQuery(`{minimal{echoes(msgs: "hello")}}`)).Stdout(ctx)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"minimal":{"echoes":["hello...hello...hello..."]}}`, out)
+	})
+
+	t.Run("func EchoesVariadic(...string) string", func(t *testing.T) {
+		t.Parallel()
+		out, err := modGen.With(daggerQuery(`{minimal{echoesVariadic(msgs: "hello")}}`)).Stdout(ctx)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"minimal":{"echoesVariadic":"hello...hello...hello..."}}`, out)
 	})
 
 	t.Run("func HelloContext(context.Context) string", func(t *testing.T) {
@@ -449,75 +644,518 @@ func TestModuleGoSignatures(t *testing.T) {
 		require.JSONEq(t, `{"minimal":{"helloVoidError":null}}`, out)
 	})
 
-	t.Run("func EchoOpts(string, Opts) error", func(t *testing.T) {
+	t.Run("func EchoOpts(string, string, int) error", func(t *testing.T) {
 		t.Parallel()
 
 		out, err := modGen.With(daggerQuery(`{minimal{echoOpts(msg: "hi")}}`)).Stdout(ctx)
 		require.NoError(t, err)
-		require.JSONEq(t, `{"minimal":{"echoOpts":"hi...hi...hi..."}}`, out)
+		require.JSONEq(t, `{"minimal":{"echoOpts":"hi"}}`, out)
 
 		out, err = modGen.With(daggerQuery(`{minimal{echoOpts(msg: "hi", suffix: "!", times: 2)}}`)).Stdout(ctx)
 		require.NoError(t, err)
 		require.JSONEq(t, `{"minimal":{"echoOpts":"hi!hi!"}}`, out)
 	})
 
-	t.Run("func EchoOptsInline(string, struct{Suffix string, Times int}) error", func(t *testing.T) {
+	t.Run("func EchoOptsInline(struct{string, string, int}) error", func(t *testing.T) {
 		t.Parallel()
 
 		out, err := modGen.With(daggerQuery(`{minimal{echoOptsInline(msg: "hi")}}`)).Stdout(ctx)
 		require.NoError(t, err)
-		require.JSONEq(t, `{"minimal":{"echoOptsInline":"hi...hi...hi..."}}`, out)
+		require.JSONEq(t, `{"minimal":{"echoOptsInline":"hi"}}`, out)
 
 		out, err = modGen.With(daggerQuery(`{minimal{echoOptsInline(msg: "hi", suffix: "!", times: 2)}}`)).Stdout(ctx)
 		require.NoError(t, err)
 		require.JSONEq(t, `{"minimal":{"echoOptsInline":"hi!hi!"}}`, out)
 	})
+
+	t.Run("func EchoOptsInlinePointer(*struct{string, string, int}) error", func(t *testing.T) {
+		t.Parallel()
+
+		out, err := modGen.With(daggerQuery(`{minimal{echoOptsInlinePointer(msg: "hi")}}`)).Stdout(ctx)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"minimal":{"echoOptsInlinePointer":"hi"}}`, out)
+
+		out, err = modGen.With(daggerQuery(`{minimal{echoOptsInlinePointer(msg: "hi", suffix: "!", times: 2)}}`)).Stdout(ctx)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"minimal":{"echoOptsInlinePointer":"hi!hi!"}}`, out)
+	})
+
+	t.Run("func EchoOptsInlineCtx(ctx, struct{string, string, int}) error", func(t *testing.T) {
+		t.Parallel()
+
+		out, err := modGen.With(daggerQuery(`{minimal{echoOptsInlineCtx(msg: "hi")}}`)).Stdout(ctx)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"minimal":{"echoOptsInlineCtx":"hi"}}`, out)
+
+		out, err = modGen.With(daggerQuery(`{minimal{echoOptsInlineCtx(msg: "hi", suffix: "!", times: 2)}}`)).Stdout(ctx)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"minimal":{"echoOptsInlineCtx":"hi!hi!"}}`, out)
+	})
+
+	t.Run("func EchoOptsInlineTags(struct{string, string, int}) error", func(t *testing.T) {
+		t.Parallel()
+
+		out, err := modGen.With(daggerQuery(`{minimal{echoOptsInlineTags(msg: "hi")}}`)).Stdout(ctx)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"minimal":{"echoOptsInlineTags":"hi"}}`, out)
+
+		out, err = modGen.With(daggerQuery(`{minimal{echoOptsInlineTags(msg: "hi", suffix: "!", times: 2)}}`)).Stdout(ctx)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"minimal":{"echoOptsInlineTags":"hi!hi!"}}`, out)
+	})
+}
+
+func TestModuleGoSignaturesBuiltinTypes(t *testing.T) {
+	t.Parallel()
+
+	c, ctx := connect(t)
+
+	modGen := c.Container().From(golangImage).
+		WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+		WithWorkdir("/work").
+		With(daggerExec("mod", "init", "--name=minimal", "--sdk=go")).
+		WithNewFile("main.go", dagger.ContainerWithNewFileOpts{
+			Contents: `package main
+
+import "context"
+
+type Minimal struct {}
+
+func (m *Minimal) Read(ctx context.Context, dir Directory) (string, error) {
+	return dir.File("foo").Contents(ctx)
+}
+
+func (m *Minimal) ReadPointer(ctx context.Context, dir *Directory) (string, error) {
+	return dir.File("foo").Contents(ctx)
+}
+
+func (m *Minimal) ReadSlice(ctx context.Context, dir []Directory) (string, error) {
+	return dir[0].File("foo").Contents(ctx)
+}
+
+func (m *Minimal) ReadVariadic(ctx context.Context, dir ...Directory) (string, error) {
+	return dir[0].File("foo").Contents(ctx)
+}
+
+func (m *Minimal) ReadOptional(ctx context.Context, dir Optional[Directory]) (string, error) {
+	d, ok := dir.Get()
+	if ok {
+		return d.File("foo").Contents(ctx)
+	}
+	return "", nil
+}
+			`,
+		})
+	logGen(ctx, t, modGen.Directory("."))
+
+	out, err := modGen.With(daggerQuery(`{directory{withNewFile(path: "foo", contents: "bar"){id}}}`)).Stdout(ctx)
+	require.NoError(t, err)
+	dirID := gjson.Get(out, "directory.withNewFile.id").String()
+
+	t.Run("func Read(ctx, Directory) (string, error)", func(t *testing.T) {
+		t.Parallel()
+		out, err := modGen.With(daggerQuery(fmt.Sprintf(`{minimal{read(dir: "%s")}}`, dirID))).Stdout(ctx)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"minimal":{"read":"bar"}}`, out)
+	})
+
+	t.Run("func ReadPointer(ctx, *Directory) (string, error)", func(t *testing.T) {
+		t.Parallel()
+		out, err := modGen.With(daggerQuery(fmt.Sprintf(`{minimal{readPointer(dir: "%s")}}`, dirID))).Stdout(ctx)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"minimal":{"readPointer":"bar"}}`, out)
+	})
+
+	t.Run("func ReadSlice(ctx, []Directory) (string, error)", func(t *testing.T) {
+		t.Parallel()
+		out, err := modGen.With(daggerQuery(fmt.Sprintf(`{minimal{readSlice(dir: ["%s"])}}`, dirID))).Stdout(ctx)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"minimal":{"readSlice":"bar"}}`, out)
+	})
+
+	t.Run("func ReadVariadic(ctx, ...Directory) (string, error)", func(t *testing.T) {
+		t.Parallel()
+		out, err := modGen.With(daggerQuery(fmt.Sprintf(`{minimal{readVariadic(dir: ["%s"])}}`, dirID))).Stdout(ctx)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"minimal":{"readVariadic":"bar"}}`, out)
+	})
+
+	t.Run("func ReadOptional(ctx, Optional[Directory]) (string, error)", func(t *testing.T) {
+		t.Parallel()
+		out, err := modGen.With(daggerQuery(fmt.Sprintf(`{minimal{readOptional(dir: "%s")}}`, dirID))).Stdout(ctx)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"minimal":{"readOptional":"bar"}}`, out)
+		out, err = modGen.With(daggerQuery(`{minimal{readOptional}}`)).Stdout(ctx)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"minimal":{"readOptional":""}}`, out)
+	})
+}
+
+func TestModuleGoSignaturesUnexported(t *testing.T) {
+	t.Parallel()
+
+	c, ctx := connect(t)
+
+	modGen := c.Container().From(golangImage).
+		WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+		WithWorkdir("/work").
+		With(daggerExec("mod", "init", "--name=minimal", "--sdk=go")).
+		WithNewFile("main.go", dagger.ContainerWithNewFileOpts{
+			Contents: `package main
+
+type Minimal struct {}
+
+type Foo struct {}
+
+type bar struct {}
+
+func (m *Minimal) Hello(name string) string {
+	return name
+}
+
+func (f *Foo) Hello(name string) string {
+	return name
+}
+
+func (b *bar) Hello(name string) string {
+	return name
+}
+`,
+		})
+	logGen(ctx, t, modGen.Directory("."))
+
+	out, err := modGen.With(inspectModule).Stdout(ctx)
+	require.NoError(t, err)
+	objs := gjson.Get(out, "host.directory.asModule.objects")
+
+	require.Equal(t, 2, len(objs.Array()))
+
+	minimal := objs.Get(`0.asObject`)
+	require.Equal(t, "Minimal", minimal.Get("name").String())
+	foo := objs.Get(`1.asObject`)
+	require.Equal(t, "MinimalFoo", foo.Get("name").String())
+
+	modGen = c.Container().From(golangImage).
+		WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+		WithWorkdir("/work").
+		With(daggerExec("mod", "init", "--name=minimal", "--sdk=go")).
+		WithNewFile("main.go", dagger.ContainerWithNewFileOpts{
+			Contents: `package main
+
+type Minimal struct {}
+
+type Foo struct {
+	Bar bar
+}
+
+type bar struct {}
+
+func (m *Minimal) Hello(name string) string {
+	return name
+}
+
+func (f *Foo) Hello(name string) string {
+	return name
+}
+
+func (b *bar) Hello(name string) string {
+	return name
+}
+`,
+		})
+	logGen(ctx, t, modGen.Directory("."))
+
+	_, err = modGen.With(inspectModule).Stderr(ctx)
+	require.Error(t, err)
+}
+
+func TestModuleGoSignaturesMixMatch(t *testing.T) {
+	t.Parallel()
+
+	c, ctx := connect(t)
+
+	modGen := c.Container().From(golangImage).
+		WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+		WithWorkdir("/work").
+		With(daggerExec("mod", "init", "--name=minimal", "--sdk=go")).
+		WithNewFile("main.go", dagger.ContainerWithNewFileOpts{
+			Contents: `package main
+
+type Minimal struct {}
+
+func (m *Minimal) Hello(name string, opts struct{}, opts2 struct{}) string {
+	return name
+}
+`,
+		})
+
+	logGen(ctx, t, modGen.Directory("."))
+
+	_, err := modGen.With(daggerQuery(`{minimal{hello}}`)).Stdout(ctx)
+	require.Error(t, err)
+}
+
+func TestModuleGoSignaturesIDable(t *testing.T) {
+	t.Parallel()
+
+	c, ctx := connect(t)
+
+	modGen := c.Container().From(golangImage).
+		WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+		WithWorkdir("/work").
+		With(daggerExec("mod", "init", "--name=minimal", "--sdk=go")).
+		WithNewFile("main.go", dagger.ContainerWithNewFileOpts{
+			Contents: `package main
+
+type Minimal struct {}
+
+type Custom struct {
+	Data string
+}
+
+func (m *Minimal) Hello() string {
+	return "hello"
+}
+
+func (m *Minimal) UseCustom(custom *Custom) string {
+	return custom.Data
+}
+`,
+		})
+
+	logGen(ctx, t, modGen.Directory("."))
+
+	// Currently, IDable modules are *not* supported, and should fail with an
+	// error that fails to find the ID type.
+	_, err := modGen.With(daggerQuery(`{minimal{hello}}`)).Stdout(ctx)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "Undefined type MinimalCustomID")
+}
+
+var inspectModule = daggerQuery(`
+query {
+  host {
+    directory(path: ".") {
+      asModule {
+        objects {
+          asObject {
+            name
+            functions {
+              name
+              description
+              args {
+                name
+                description
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+`)
+
+func TestModuleGoDocs(t *testing.T) {
+	t.Parallel()
+
+	c, ctx := connect(t)
+
+	modGen := c.Container().From(golangImage).
+		WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+		WithWorkdir("/work").
+		With(daggerExec("mod", "init", "--name=minimal", "--sdk=go")).
+		WithNewFile("main.go", dagger.ContainerWithNewFileOpts{
+			Contents: goSignatures,
+		})
+
+	logGen(ctx, t, modGen.Directory("."))
+
+	out, err := modGen.With(inspectModule).Stdout(ctx)
+	require.NoError(t, err)
+	obj := gjson.Get(out, "host.directory.asModule.objects.0.asObject")
+	require.Equal(t, "Minimal", obj.Get("name").String())
+
+	hello := obj.Get(`functions.#(name="hello")`)
+	require.Equal(t, "hello", hello.Get("name").String())
+	require.Empty(t, hello.Get("description").String())
+	require.Empty(t, hello.Get("args").Array())
+
+	// test the args-based form
+	echoOpts := obj.Get(`functions.#(name="echoOpts")`)
+	require.Equal(t, "echoOpts", echoOpts.Get("name").String())
+	require.Equal(t, "EchoOpts does some opts things", echoOpts.Get("description").String())
+	require.Len(t, echoOpts.Get("args").Array(), 3)
+	require.Equal(t, "msg", echoOpts.Get("args.0.name").String())
+	require.Equal(t, "the message to echo", echoOpts.Get("args.0.description").String())
+	require.Equal(t, "suffix", echoOpts.Get("args.1.name").String())
+	require.Equal(t, "String to append to the echoed message", echoOpts.Get("args.1.description").String())
+	require.Equal(t, "times", echoOpts.Get("args.2.name").String())
+	require.Equal(t, "Number of times to repeat the message", echoOpts.Get("args.2.description").String())
+
+	// test the inline struct form
+	echoOpts = obj.Get(`functions.#(name="echoOptsInline")`)
+	require.Equal(t, "echoOptsInline", echoOpts.Get("name").String())
+	require.Equal(t, "EchoOptsInline does some opts things", echoOpts.Get("description").String())
+	require.Len(t, echoOpts.Get("args").Array(), 3)
+	require.Equal(t, "msg", echoOpts.Get("args.0.name").String())
+	require.Equal(t, "the message to echo", echoOpts.Get("args.0.description").String())
+	require.Equal(t, "suffix", echoOpts.Get("args.1.name").String())
+	require.Equal(t, "String to append to the echoed message", echoOpts.Get("args.1.description").String())
+	require.Equal(t, "times", echoOpts.Get("args.2.name").String())
+	require.Equal(t, "Number of times to repeat the message", echoOpts.Get("args.2.description").String())
+}
+
+func TestModuleGoDocsEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	c, ctx := connect(t)
+
+	modGen := c.Container().From(golangImage).
+		WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+		WithWorkdir("/work").
+		With(daggerExec("mod", "init", "--name=minimal", "--sdk=go")).
+		WithNewFile("main.go", dagger.ContainerWithNewFileOpts{
+			Contents: `package main
+
+type Minimal struct {}
+
+// some docs
+func (m *Minimal) Hello(foo string, bar string,
+// hello
+baz string, qux string, x string, // lol
+) string {
+	return foo + bar
+}
+
+func (m *Minimal) HelloMore(
+	// foo here
+	foo,
+	// bar here
+	bar string,
+) string {
+	return foo + bar
+}
+
+func (m *Minimal) HelloAgain(
+	foo string, // docs for foo
+	bar string,
+) string {
+	return foo + bar
+}
+`,
+		})
+
+	logGen(ctx, t, modGen.Directory("."))
+
+	out, err := modGen.With(inspectModule).Stdout(ctx)
+	require.NoError(t, err)
+	obj := gjson.Get(out, "host.directory.asModule.objects.0.asObject")
+	require.Equal(t, "Minimal", obj.Get("name").String())
+
+	hello := obj.Get(`functions.#(name="hello")`)
+	require.Equal(t, "hello", hello.Get("name").String())
+	require.Len(t, hello.Get("args").Array(), 5)
+	require.Equal(t, "foo", hello.Get("args.0.name").String())
+	require.Equal(t, "", hello.Get("args.0.description").String())
+	require.Equal(t, "bar", hello.Get("args.1.name").String())
+	require.Equal(t, "", hello.Get("args.1.description").String())
+	require.Equal(t, "baz", hello.Get("args.2.name").String())
+	require.Equal(t, "hello", hello.Get("args.2.description").String())
+	require.Equal(t, "qux", hello.Get("args.3.name").String())
+	require.Equal(t, "", hello.Get("args.3.description").String())
+	require.Equal(t, "x", hello.Get("args.4.name").String())
+	require.Equal(t, "lol", hello.Get("args.4.description").String())
+
+	hello = obj.Get(`functions.#(name="helloMore")`)
+	require.Equal(t, "helloMore", hello.Get("name").String())
+	require.Len(t, hello.Get("args").Array(), 2)
+	require.Equal(t, "foo", hello.Get("args.0.name").String())
+	require.Equal(t, "foo here", hello.Get("args.0.description").String())
+	require.Equal(t, "bar", hello.Get("args.1.name").String())
+	require.Equal(t, "bar here", hello.Get("args.1.description").String())
+
+	// hello = obj.Get(`functions.#(name="helloAgain")`)
+	// require.Equal(t, "helloAgain", hello.Get("name").String())
+	// require.Len(t, hello.Get("args").Array(), 2)
+	// require.Equal(t, "foo", hello.Get("args.0.name").String())
+	// require.Equal(t, "docs for foo", hello.Get("args.0.description").String())
+	// require.Equal(t, "bar", hello.Get("args.1.name").String())
+	// require.Equal(t, "", hello.Get("args.1.description").String())
 }
 
 //go:embed testdata/modules/go/extend/main.go
 var goExtend string
 
+// this is no longer allowed, but verify the SDK errors out
 func TestModuleGoExtendCore(t *testing.T) {
 	t.Parallel()
 
-	c, ctx := connect(t)
+	var logs safeBuffer
+	c, ctx := connect(t, dagger.WithLogOutput(&logs))
 
-	modGen := c.Container().From(golangImage).
+	_, err := c.Container().From(golangImage).
 		WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
 		WithWorkdir("/work").
 		With(daggerExec("mod", "init", "--name=test", "--sdk=go")).
 		WithNewFile("main.go", dagger.ContainerWithNewFileOpts{
 			Contents: goExtend,
-		})
+		}).
+		With(daggerExec("mod", "sync")).
+		Sync(ctx)
 
-	logGen(ctx, t, modGen.Directory("."))
-
-	out, err := modGen.With(daggerQuery(`{container{from(address:"` + alpineImage + `"){echo(msg:"hi!")}}}`)).Stdout(ctx)
-	require.NoError(t, err)
-	require.JSONEq(t, `{"container":{"from":{"echo":"hi!\n"}}}`, out)
+	require.Error(t, err)
+	require.NoError(t, c.Close())
+	require.Contains(t, logs.String(), "cannot define methods on objects from outside this module")
 }
 
 //go:embed testdata/modules/go/custom-types/main.go
-var customTypes string
+var goCustomTypes string
 
-func TestModuleGoCustomTypes(t *testing.T) {
+//go:embed testdata/modules/python/custom-types/main.py
+var pythonCustomTypes string
+
+func TestModuleCustomTypes(t *testing.T) {
 	t.Parallel()
 
-	c, ctx := connect(t)
+	type testCase struct {
+		sdk           string
+		sourcePath    string
+		sourceContent string
+	}
 
-	modGen := c.Container().From(golangImage).
-		WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
-		WithWorkdir("/work").
-		With(daggerExec("mod", "init", "--name=test", "--sdk=go")).
-		WithNewFile("main.go", dagger.ContainerWithNewFileOpts{
-			Contents: customTypes,
+	for _, tc := range []testCase{
+		{
+			sdk:           "go",
+			sourcePath:    "main.go",
+			sourceContent: goCustomTypes,
+		},
+		{
+			sdk:           "python",
+			sourcePath:    "src/main.py",
+			sourceContent: pythonCustomTypes,
+		},
+	} {
+		t.Run(fmt.Sprintf("custom %s types", tc.sdk), func(t *testing.T) {
+			c, ctx := connect(t)
+
+			modGen := c.Container().From(golangImage).
+				WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+				WithWorkdir("/work").
+				With(daggerExec("mod", "init", "--name=test", "--sdk="+tc.sdk)).
+				WithNewFile(tc.sourcePath, dagger.ContainerWithNewFileOpts{
+					Contents: tc.sourceContent,
+				})
+
+			if tc.sdk == "go" {
+				logGen(ctx, t, modGen.Directory("."))
+			}
+
+			out, err := modGen.With(daggerQuery(`{test{repeater(msg:"echo!", times: 3){render}}}`)).Stdout(ctx)
+			require.NoError(t, err)
+			require.JSONEq(t, `{"test":{"repeater":{"render":"echo!echo!echo!"}}}`, out)
 		})
-
-	logGen(ctx, t, modGen.Directory("."))
-
-	out, err := modGen.With(daggerQuery(`{test{repeater(msg:"echo!", times: 3){render}}}`)).Stdout(ctx)
-	require.NoError(t, err)
-	require.JSONEq(t, `{"test":{"repeater":{"render":"echo!echo!echo!"}}}`, out)
+	}
 }
 
 func TestModuleGoReturnTypeDetection(t *testing.T) {
@@ -551,42 +1189,221 @@ func (m *Foo) MyFunction() X {
 	require.JSONEq(t, `{"foo":{"myFunction":{"message":"foo"}}}`, out)
 }
 
-//go:embed testdata/modules/go/use/dep/main.go
-var useInner string
-
-//go:embed testdata/modules/go/use/main.go
-var useOuter string
-
-func TestModuleGoUseLocal(t *testing.T) {
+func TestModuleGoGlobalVarDAG(t *testing.T) {
 	t.Parallel()
 
 	c, ctx := connect(t)
 
 	modGen := c.Container().From(golangImage).
 		WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
-		WithWorkdir("/work/dep").
-		With(daggerExec("mod", "init", "--name=dep", "--sdk=go")).
 		WithWorkdir("/work").
-		With(daggerExec("mod", "init", "--name=use", "--sdk=go")).
-		WithNewFile("/work/dep/main.go", dagger.ContainerWithNewFileOpts{
-			Contents: useInner,
-		}).
-		WithNewFile("/work/main.go", dagger.ContainerWithNewFileOpts{
-			Contents: useOuter,
-		}).
-		With(daggerExec("mod", "use", "./dep")).
-		WithEnvVariable("BUST", identity.NewID()) // NB(vito): hmm...
+		With(daggerExec("mod", "init", "--name=foo", "--sdk=go")).
+		WithNewFile("main.go", dagger.ContainerWithNewFileOpts{
+			Contents: `package main
+
+import "context"
+
+type Foo struct {}
+
+var someDefault = dag.Container().From("alpine:latest")
+
+func (m *Foo) Fn(ctx context.Context) (string, error) {
+	return someDefault.WithExec([]string{"echo", "foo"}).Stdout(ctx)
+}
+`,
+		})
 
 	logGen(ctx, t, modGen.Directory("."))
 
-	out, err := modGen.With(daggerQuery(`{use{useHello}}`)).Stdout(ctx)
+	out, err := modGen.With(daggerQuery(`{foo{fn}}`)).Stdout(ctx)
 	require.NoError(t, err)
-	require.JSONEq(t, `{"use":{"useHello":"hello"}}`, out)
+	require.JSONEq(t, `{"foo":{"fn":"foo\n"}}`, out)
+}
 
-	// cannot use transitive dependency directly
-	_, err = modGen.With(daggerQuery(`{dep{hello}}`)).Stdout(ctx)
-	require.Error(t, err)
-	require.ErrorContains(t, err, `Cannot query field "dep" on type "Query".`)
+//go:embed testdata/modules/go/use/dep/main.go
+var useInner string
+
+//go:embed testdata/modules/go/use/main.go
+var useOuter string
+
+func TestModuleUseLocal(t *testing.T) {
+	t.Parallel()
+
+	c, ctx := connect(t)
+
+	t.Run("go uses go", func(t *testing.T) {
+		t.Parallel()
+
+		modGen := c.Container().From(golangImage).
+			WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+			WithWorkdir("/work/dep").
+			With(daggerExec("mod", "init", "--name=dep", "--sdk=go")).
+			WithWorkdir("/work").
+			With(daggerExec("mod", "init", "--name=use", "--sdk=go")).
+			WithNewFile("/work/dep/main.go", dagger.ContainerWithNewFileOpts{
+				Contents: useInner,
+			}).
+			WithNewFile("/work/main.go", dagger.ContainerWithNewFileOpts{
+				Contents: useOuter,
+			}).
+			With(daggerExec("mod", "install", "./dep")).
+			WithEnvVariable("BUST", identity.NewID()) // NB(vito): hmm...
+
+		logGen(ctx, t, modGen.Directory("."))
+
+		out, err := modGen.With(daggerQuery(`{use{useHello}}`)).Stdout(ctx)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"use":{"useHello":"hello"}}`, out)
+
+		// cannot use transitive dependency directly
+		_, err = modGen.With(daggerQuery(`{dep{hello}}`)).Stdout(ctx)
+		require.Error(t, err)
+		require.ErrorContains(t, err, `Cannot query field "dep" on type "Query".`)
+	})
+
+	t.Run("python uses go", func(t *testing.T) {
+		t.Parallel()
+
+		modGen := c.Container().From(golangImage).
+			WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+			WithWorkdir("/work/dep").
+			With(daggerExec("mod", "init", "--name=dep", "--sdk=go")).
+			WithNewFile("/work/dep/main.go", dagger.ContainerWithNewFileOpts{
+				Contents: useInner,
+			}).
+			WithWorkdir("/work").
+			With(daggerExec("mod", "init", "--name=use", "--sdk=python")).
+			With(daggerExec("mod", "install", "./dep")).
+			WithNewFile("/work/src/main.py", dagger.ContainerWithNewFileOpts{
+				Contents: `from dagger.mod import function
+import dagger
+
+@function
+def use_hello() -> str:
+    return dagger.dep().hello()
+`,
+			})
+
+		out, err := modGen.With(daggerQuery(`{use{useHello}}`)).Stdout(ctx)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"use":{"useHello":"hello"}}`, out)
+
+		// cannot use transitive dependency directly
+		_, err = modGen.With(daggerQuery(`{dep{hello}}`)).Stdout(ctx)
+		require.Error(t, err)
+		require.ErrorContains(t, err, `Cannot query field "dep" on type "Query".`)
+	})
+}
+
+func TestModuleCodegenonDepChange(t *testing.T) {
+	t.Parallel()
+
+	c, ctx := connect(t)
+
+	t.Run("go uses go", func(t *testing.T) {
+		t.Parallel()
+
+		modGen := c.Container().From(golangImage).
+			WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+			WithWorkdir("/work/dep").
+			With(daggerExec("mod", "init", "--name=dep", "--sdk=go")).
+			WithWorkdir("/work").
+			With(daggerExec("mod", "init", "--name=use", "--sdk=go")).
+			WithNewFile("/work/dep/main.go", dagger.ContainerWithNewFileOpts{
+				Contents: useInner,
+			}).
+			WithNewFile("/work/main.go", dagger.ContainerWithNewFileOpts{
+				Contents: useOuter,
+			}).
+			With(daggerExec("mod", "install", "./dep"))
+
+		logGen(ctx, t, modGen.Directory("."))
+
+		out, err := modGen.With(daggerQuery(`{use{useHello}}`)).Stdout(ctx)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"use":{"useHello":"hello"}}`, out)
+
+		// make back-incompatible change to dep
+		newInner := strings.ReplaceAll(useInner, `Hello()`, `Hellov2()`)
+		modGen = modGen.
+			WithNewFile("/work/dep/main.go", dagger.ContainerWithNewFileOpts{
+				Contents: newInner,
+			}).
+			WithExec([]string{"sh", "-c", "dagger mod sync"}, dagger.ContainerWithExecOpts{
+				ExperimentalPrivilegedNesting: true,
+			})
+
+		codegenContents, err := modGen.File("/work/dagger.gen.go").Contents(ctx)
+		require.NoError(t, err)
+		require.Contains(t, codegenContents, "Hellov2")
+
+		newOuter := strings.ReplaceAll(useOuter, `Hello(ctx)`, `Hellov2(ctx)`)
+		modGen = modGen.
+			WithNewFile("/work/main.go", dagger.ContainerWithNewFileOpts{
+				Contents: newOuter,
+			})
+
+		out, err = modGen.With(daggerQuery(`{use{useHello}}`)).Stdout(ctx)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"use":{"useHello":"hello"}}`, out)
+	})
+
+	t.Run("python uses go", func(t *testing.T) {
+		t.Parallel()
+
+		modGen := c.Container().From(golangImage).
+			WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+			WithWorkdir("/work/dep").
+			With(daggerExec("mod", "init", "--name=dep", "--sdk=go")).
+			WithNewFile("/work/dep/main.go", dagger.ContainerWithNewFileOpts{
+				Contents: useInner,
+			}).
+			WithWorkdir("/work").
+			With(daggerExec("mod", "init", "--name=use", "--sdk=python")).
+			With(daggerExec("mod", "install", "./dep")).
+			WithNewFile("/work/src/main.py", dagger.ContainerWithNewFileOpts{
+				Contents: `from dagger.mod import function
+import dagger
+
+@function
+def use_hello() -> str:
+    return dagger.dep().hello()
+`,
+			})
+
+		out, err := modGen.With(daggerQuery(`{use{useHello}}`)).Stdout(ctx)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"use":{"useHello":"hello"}}`, out)
+
+		// make back-incompatible change to dep
+		newInner := strings.ReplaceAll(useInner, `Hello()`, `Hellov2()`)
+		modGen = modGen.
+			WithNewFile("/work/dep/main.go", dagger.ContainerWithNewFileOpts{
+				Contents: newInner,
+			}).
+			WithExec([]string{"sh", "-c", "dagger mod sync"}, dagger.ContainerWithExecOpts{
+				ExperimentalPrivilegedNesting: true,
+			})
+
+		codegenContents, err := modGen.File("/work/sdk/src/dagger/client/gen.py").Contents(ctx)
+		require.NoError(t, err)
+		require.Contains(t, codegenContents, "hellov2")
+
+		modGen = modGen.
+			WithNewFile("/work/src/main.py", dagger.ContainerWithNewFileOpts{
+				Contents: `from dagger.mod import function
+import dagger
+
+@function
+def use_hello() -> str:
+    return dagger.dep().hellov2()
+`,
+			})
+
+		out, err = modGen.With(daggerQuery(`{use{useHello}}`)).Stdout(ctx)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"use":{"useHello":"hello"}}`, out)
+	})
 }
 
 func TestModuleGoUseLocalMulti(t *testing.T) {
@@ -618,8 +1435,8 @@ func (m *Bar) Name() string { return "bar" }
 		With(daggerExec("mod", "init", "--name=bar", "--sdk=go")).
 		WithWorkdir("/work").
 		With(daggerExec("mod", "init", "--name=use", "--sdk=go")).
-		With(daggerExec("mod", "use", "./foo")).
-		With(daggerExec("mod", "use", "./bar")).
+		With(daggerExec("mod", "install", "./foo")).
+		With(daggerExec("mod", "install", "./bar")).
 		WithNewFile("/work/main.go", dagger.ContainerWithNewFileOpts{
 			Contents: `package main
 
@@ -704,38 +1521,658 @@ func TestModuleConfigAPI(t *testing.T) {
 	require.Equal(t, "..", root)
 }
 
-func TestModulePython(t *testing.T) {
-	// TODO: simple e2e test for now, can be split out into many different tests with different focuses
+func TestModulePythonInit(t *testing.T) {
+	t.Run("from scratch", func(t *testing.T) {
+		t.Parallel()
+
+		c, ctx := connect(t)
+
+		modGen := c.Container().From(golangImage).
+			WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+			WithWorkdir("/work").
+			With(daggerExec("mod", "init", "--name=bare", "--sdk=python"))
+
+		out, err := modGen.
+			With(daggerQuery(`{bare{containerEcho(stringArg:"hello"){stdout}}}`)).
+			Stdout(ctx)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"bare":{"containerEcho":{"stdout":"hello\n"}}}`, out)
+	})
+
+	t.Run("respects existing pyproject.toml", func(t *testing.T) {
+		t.Parallel()
+
+		c, ctx := connect(t)
+
+		modGen := c.Container().From(golangImage).
+			WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+			WithWorkdir("/work").
+			WithNewFile("pyproject.toml", dagger.ContainerWithNewFileOpts{
+				Contents: `[project]
+name = "has-pyproject"
+version = "0.0.0"
+`,
+			}).
+			With(daggerExec("mod", "init", "--name=hasPyproject", "--sdk=python"))
+
+		out, err := modGen.
+			With(daggerQuery(`{hasPyproject{containerEcho(stringArg:"hello"){stdout}}}`)).
+			Stdout(ctx)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"hasPyproject":{"containerEcho":{"stdout":"hello\n"}}}`, out)
+
+		t.Run("preserves module name", func(t *testing.T) {
+			generated, err := modGen.File("pyproject.toml").Contents(ctx)
+			require.NoError(t, err)
+			require.Contains(t, generated, `name = "has-pyproject"`)
+		})
+	})
+
+	t.Run("respects existing main.py", func(t *testing.T) {
+		t.Parallel()
+
+		c, ctx := connect(t)
+
+		modGen := c.Container().From(golangImage).
+			WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+			WithWorkdir("/work").
+			WithNewFile("/work/src/main/__init__.py", dagger.ContainerWithNewFileOpts{
+				Contents: "from . import notmain\n",
+			}).
+			WithNewFile("/work/src/main/notmain.py", dagger.ContainerWithNewFileOpts{
+				Contents: `from dagger.mod import function
+
+@function
+def hello() -> str:
+    return "Hello, world!"
+`,
+			}).
+			With(daggerExec("mod", "init", "--name=hasMainPy", "--sdk=python"))
+
+		out, err := modGen.
+			With(daggerQuery(`{hasMainPy{hello}}`)).
+			Stdout(ctx)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"hasMainPy":{"hello":"Hello, world!"}}`, out)
+	})
+}
+
+func TestModuleLotsOfFunctions(t *testing.T) {
+	t.Parallel()
+
+	const funcCount = 100
+
+	t.Run("go sdk", func(t *testing.T) {
+		t.Parallel()
+
+		c, ctx := connect(t)
+
+		mainSrc := `
+		package main
+
+		type PotatoSack struct {}
+		`
+
+		for i := 0; i < funcCount; i++ {
+			mainSrc += fmt.Sprintf(`
+			func (m *PotatoSack) Potato%d() string {
+				return "potato #%d"
+			}
+			`, i, i)
+		}
+
+		modGen := c.Container().From(golangImage).
+			WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+			WithWorkdir("/work").
+			WithNewFile("/work/main.go", dagger.ContainerWithNewFileOpts{
+				Contents: mainSrc,
+			}).
+			With(daggerExec("mod", "init", "--name=potatoSack", "--sdk=go"))
+
+		logGen(ctx, t, modGen.Directory("."))
+
+		var eg errgroup.Group
+		for i := 0; i < funcCount; i++ {
+			i := i
+			// just verify a subset work
+			if i%10 != 0 {
+				continue
+			}
+			eg.Go(func() error {
+				_, err := modGen.
+					With(daggerCall(fmt.Sprintf("potato%d", i))).
+					Sync(ctx)
+				return err
+			})
+		}
+		require.NoError(t, eg.Wait())
+	})
+
+	t.Run("python sdk", func(t *testing.T) {
+		t.Parallel()
+
+		c, ctx := connect(t)
+
+		mainSrc := `from dagger.mod import function
+		`
+
+		for i := 0; i < funcCount; i++ {
+			mainSrc += fmt.Sprintf(`
+@function
+def potato_%d() -> str:
+    return "potato #%d"
+`, i, i)
+		}
+
+		modGen := c.Container().From(golangImage).
+			WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+			WithWorkdir("/work").
+			WithNewFile("./src/main.py", dagger.ContainerWithNewFileOpts{
+				Contents: mainSrc,
+			}).
+			With(daggerExec("mod", "init", "--name=potatoSack", "--sdk=python"))
+
+		var eg errgroup.Group
+		for i := 0; i < funcCount; i++ {
+			i := i
+			// just verify a subset work
+			if i%10 != 0 {
+				continue
+			}
+			eg.Go(func() error {
+				_, err := modGen.
+					With(daggerCall(fmt.Sprintf("potato%d", i))).
+					Sync(ctx)
+				return err
+			})
+		}
+		require.NoError(t, eg.Wait())
+	})
+}
+
+func TestModuleLotsOfDeps(t *testing.T) {
 	t.Parallel()
 
 	c, ctx := connect(t)
 
 	modGen := c.Container().From(golangImage).
 		WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
-		WithWorkdir("/work").
-		WithNewFile("./pyproject.toml", dagger.ContainerWithNewFileOpts{
-			Contents: `[project]
-name = "test"
-version = "0.0.0"
-`,
-		}).
-		WithNewFile("./src/main.py", dagger.ContainerWithNewFileOpts{
-			Contents: `from dagger.ext import function
+		WithWorkdir("/work")
 
+	modCount := 0
 
-@function
-def hello(name: str) -> str:
-    """Say hello to someone."""
-    return f"Hello, {name}!"
-`,
-		}).
-		With(daggerExec("mod", "init", "--name=test", "--sdk=python"))
+	getModMainSrc := func(name string, depNames []string) string {
+		t.Helper()
+		mainSrc := fmt.Sprintf(`package main
+import "context"
 
-	t.Run("func Hello() string", func(t *testing.T) {
-		t.Parallel()
-		out, err := modGen.With(daggerQuery(`{test{hello(name: "there")}}`)).Stdout(ctx)
+type %s struct {}
+
+func (m *%s) Fn(ctx context.Context) (string, error) {
+	s := "%s"
+	var depS string
+	_ = depS
+	var err error
+	_ = err
+`, strcase.ToCamel(name), strcase.ToCamel(name), name)
+		for _, depName := range depNames {
+			mainSrc += fmt.Sprintf(`
+depS, err = dag.%s().Fn(ctx)
+if err != nil {
+	return "", err
+}
+s += depS
+`, strcase.ToCamel(depName))
+		}
+		mainSrc += "return s, nil\n}\n"
+		fmted, err := format.Source([]byte(mainSrc))
 		require.NoError(t, err)
-		require.JSONEq(t, `{"test":{"hello":"Hello, there!"}}`, out)
+		return string(fmted)
+	}
+
+	// need to construct dagger.json directly in order to avoid excessive
+	// `dagger mod use` calls while constructing the huge DAG of deps
+	getModDaggerConfig := func(name string, depNames []string) string {
+		t.Helper()
+
+		var depVals []string
+		for _, depName := range depNames {
+			depVals = append(depVals, "../"+depName)
+		}
+		cfg := modules.Config{
+			Name:         name,
+			Root:         "..",
+			SDK:          "go",
+			Dependencies: depVals,
+		}
+		bs, err := json.Marshal(cfg)
+		require.NoError(t, err)
+		return string(bs)
+	}
+
+	addModulesWithDeps := func(newMods int, depNames []string) []string {
+		t.Helper()
+
+		var newModNames []string
+		for i := 0; i < newMods; i++ {
+			name := fmt.Sprintf("mod%d", modCount)
+			modCount++
+			newModNames = append(newModNames, name)
+			modGen = modGen.
+				WithWorkdir("/work/"+name).
+				WithNewFile("./main.go", dagger.ContainerWithNewFileOpts{
+					Contents: getModMainSrc(name, depNames),
+				}).
+				WithNewFile("./dagger.json", dagger.ContainerWithNewFileOpts{
+					Contents: getModDaggerConfig(name, depNames),
+				})
+		}
+		return newModNames
+	}
+
+	// Create a base module, then add 6 layers of deps, where each layer has one more module
+	// than the last of modules as the previous layer and each module within the layer has a
+	// dep on each module from the previous layer. Finally add a single module at the top that
+	// depends on all modules from the last layer and call that.
+	// Basically, this creates a quadratically growing DAG of modules and verifies we
+	// handle it efficiently enough to be callable.
+	curDeps := addModulesWithDeps(1, nil)
+	for i := 0; i < 6; i++ {
+		curDeps = addModulesWithDeps(len(curDeps)+1, curDeps)
+	}
+	addModulesWithDeps(1, curDeps)
+
+	_, err := modGen.With(daggerCall("fn")).Stdout(ctx)
+	require.NoError(t, err)
+}
+
+func TestModuleNamespacing(t *testing.T) {
+	t.Parallel()
+
+	c, ctx := connect(t)
+
+	moduleSrcPath, err := filepath.Abs("./testdata/modules/go/namespacing")
+	require.NoError(t, err)
+
+	ctr := c.Container().From(alpineImage).
+		WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+		WithMountedDirectory("/work", c.Host().Directory(moduleSrcPath)).
+		WithWorkdir("/work")
+
+	out, err := ctr.
+		With(daggerQuery(`{test{fn(s:"yo")}}`)).
+		Stdout(ctx)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"test":{"fn":"1:yo 2:yo"}}`, out)
+}
+
+func TestModuleDaggerCall(t *testing.T) {
+	t.Parallel()
+
+	c, ctx := connect(t)
+
+	t.Run("service args", func(t *testing.T) {
+		t.Parallel()
+
+		modGen := c.Container().From(golangImage).
+			WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+			WithWorkdir("/work").
+			With(daggerExec("mod", "init", "--name=test", "--sdk=go")).
+			WithNewFile("main.go", dagger.ContainerWithNewFileOpts{
+				Contents: `package main
+import (
+	"context"
+)
+
+type Test struct {}
+
+func (m *Test) Fn(ctx context.Context, svc *Service) (string, error) {
+	return dag.Container().From("alpine:3.18").WithExec([]string{"apk", "add", "curl"}).
+		WithServiceBinding("daserver", svc).
+		WithExec([]string{"curl", "http://daserver:8000"}).
+		Stdout(ctx)
+}
+`,
+			})
+
+		logGen(ctx, t, modGen.Directory("."))
+
+		httpServer, _ := httpService(ctx, t, c, "im up")
+		endpoint, err := httpServer.Endpoint(ctx)
+		require.NoError(t, err)
+
+		out, err := modGen.
+			WithServiceBinding("testserver", httpServer).
+			With(daggerCall("fn", "--svc", "tcp://"+endpoint)).Stdout(ctx)
+		require.NoError(t, err)
+		require.Equal(t, strings.TrimSpace(out), "im up")
+	})
+
+	t.Run("list args", func(t *testing.T) {
+		t.Parallel()
+
+		modGen := c.Container().From(golangImage).
+			WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+			WithWorkdir("/work").
+			With(daggerExec("mod", "init", "--name=minimal", "--sdk=go")).
+			WithNewFile("foo.txt", dagger.ContainerWithNewFileOpts{
+				Contents: "bar",
+			}).
+			WithNewFile("main.go", dagger.ContainerWithNewFileOpts{
+				Contents: `package main
+import (
+	"context"
+	"strings"
+)
+
+type Minimal struct {}
+
+func (m *Minimal) Hello(msgs []string) string {
+	return strings.Join(msgs, "+")
+}
+
+func (m *Minimal) Reads(ctx context.Context, files []File) (string, error) {
+	var contents []string
+	for _, f := range files {
+		content, err := f.Contents(ctx)
+		if err != nil {
+			return "", err
+		}
+		contents = append(contents, content)
+	}
+	return strings.Join(contents, "+"), nil
+}
+`,
+			})
+
+		logGen(ctx, t, modGen.Directory("."))
+
+		out, err := modGen.With(daggerCall("hello", "--msgs", "yo", "--msgs", "my", "--msgs", "friend")).Stdout(ctx)
+		require.NoError(t, err)
+		require.Equal(t, strings.TrimSpace(out), "yo+my+friend")
+
+		out, err = modGen.With(daggerCall("reads", "--files=foo.txt", "--files=foo.txt")).Stdout(ctx)
+		require.NoError(t, err)
+		require.Equal(t, strings.TrimSpace(out), "bar+bar")
+	})
+
+	t.Run("return list objects", func(t *testing.T) {
+		t.Parallel()
+
+		modGen := c.Container().From(golangImage).
+			WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+			WithWorkdir("/work").
+			With(daggerExec("mod", "init", "--name=minimal", "--sdk=go")).
+			WithNewFile("main.go", dagger.ContainerWithNewFileOpts{
+				Contents: `package main
+type Minimal struct {}
+
+type Foo struct {
+	Bar int ` + "`" + `json:"bar"` + "`" + `
+}
+
+func (m *Minimal) Fn() []*Foo {
+	var foos []*Foo
+	for i := 0; i < 3; i++ {
+		foos = append(foos, &Foo{Bar: i})
+	}
+	return foos
+}
+`,
+			})
+
+		logGen(ctx, t, modGen.Directory("."))
+
+		out, err := modGen.With(daggerCall("fn", "bar")).Stdout(ctx)
+		require.NoError(t, err)
+		require.Equal(t, strings.TrimSpace(out), "0\n1\n2")
+	})
+
+	t.Run("directory arg inputs", func(t *testing.T) {
+		t.Parallel()
+
+		t.Run("local dir", func(t *testing.T) {
+			t.Parallel()
+			modGen := c.Container().From(golangImage).
+				WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+				WithWorkdir("/work").
+				With(daggerExec("mod", "init", "--name=test", "--sdk=go")).
+				WithNewFile("/dir/subdir/foo.txt", dagger.ContainerWithNewFileOpts{
+					Contents: "foo",
+				}).
+				WithNewFile("/dir/subdir/bar.txt", dagger.ContainerWithNewFileOpts{
+					Contents: "bar",
+				}).
+				WithNewFile("main.go", dagger.ContainerWithNewFileOpts{
+					Contents: `package main
+type Test struct {}
+
+func (m *Test) Fn(dir *Directory) *Directory {
+	return dir
+}
+	`,
+				})
+
+			out, err := modGen.With(daggerCall("fn", "--dir", "/dir/subdir")).Stdout(ctx)
+			require.NoError(t, err)
+			require.Equal(t, strings.TrimSpace(out), "bar.txt\nfoo.txt")
+
+			out, err = modGen.With(daggerCall("fn", "--dir", "file:///dir/subdir")).Stdout(ctx)
+			require.NoError(t, err)
+			require.Equal(t, strings.TrimSpace(out), "bar.txt\nfoo.txt")
+		})
+
+		t.Run("git dir", func(t *testing.T) {
+			t.Parallel()
+
+			modGen := c.Container().From(golangImage).
+				WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+				WithWorkdir("/work").
+				With(daggerExec("mod", "init", "--name=test", "--sdk=go")).
+				WithNewFile("main.go", dagger.ContainerWithNewFileOpts{
+					Contents: `package main
+type Test struct {}
+
+func (m *Test) Fn(dir *Directory, subpath Optional[string]) *Directory {
+	return dir.Directory(subpath.GetOr("."))
+}
+	`,
+				})
+
+			for _, tc := range []struct {
+				baseURL string
+				subpath string
+			}{
+				{
+					baseURL: "https://github.com/dagger/dagger",
+				},
+				{
+					baseURL: "https://github.com/dagger/dagger",
+					subpath: ".changes",
+				},
+				{
+					baseURL: "https://github.com/dagger/dagger.git",
+				},
+				{
+					baseURL: "https://github.com/dagger/dagger.git",
+					subpath: ".changes",
+				},
+			} {
+				tc := tc
+				t.Run(fmt.Sprintf("%s:%s", tc.baseURL, tc.subpath), func(t *testing.T) {
+					t.Parallel()
+					url := tc.baseURL + "#v0.9.1"
+					if tc.subpath != "" {
+						url += ":" + tc.subpath
+					}
+
+					args := []string{"fn", "--dir", url}
+					if tc.subpath == "" {
+						args = append(args, "--subpath", ".changes")
+					}
+					out, err := modGen.With(daggerCall(args...)).Stdout(ctx)
+					require.NoError(t, err)
+
+					require.Contains(t, out, "v0.9.1.md")
+					require.NotContains(t, out, "v0.9.2.md")
+				})
+			}
+		})
+	})
+}
+
+func TestModuleGoSyncDeps(t *testing.T) {
+	// verify that changes to deps result in a sync to the depender module
+	t.Parallel()
+
+	c, ctx := connect(t)
+
+	modGen := c.Container().From(golangImage).
+		WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+		WithWorkdir("/work/dep").
+		With(daggerExec("mod", "init", "--name=dep", "--sdk=go")).
+		WithWorkdir("/work").
+		With(daggerExec("mod", "init", "--name=use", "--sdk=go")).
+		WithNewFile("/work/dep/main.go", dagger.ContainerWithNewFileOpts{
+			Contents: useInner,
+		}).
+		WithNewFile("/work/main.go", dagger.ContainerWithNewFileOpts{
+			Contents: useOuter,
+		}).
+		With(daggerExec("mod", "install", "./dep"))
+
+	logGen(ctx, t, modGen.Directory("."))
+
+	modGen = modGen.With(daggerQuery(`{use{useHello}}`))
+	out, err := modGen.Stdout(ctx)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"use":{"useHello":"hello"}}`, out)
+
+	newInner := strings.ReplaceAll(useInner, `"hello"`, `"goodbye"`)
+	modGen = modGen.
+		WithNewFile("/work/dep/main.go", dagger.ContainerWithNewFileOpts{
+			Contents: newInner,
+		}).
+		With(daggerExec("mod", "sync"))
+
+	logGen(ctx, t, modGen.Directory("."))
+
+	out, err = modGen.With(daggerQuery(`{use{useHello}}`)).Stdout(ctx)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"use":{"useHello":"goodbye"}}`, out)
+}
+
+//go:embed testdata/modules/go/id/arg/main.go
+var badIDArgGoSrc string
+
+//go:embed testdata/modules/python/id/arg/src/main.py
+var badIDArgPySrc string
+
+//go:embed testdata/modules/go/id/field/main.go
+var badIDFieldGoSrc string
+
+//go:embed testdata/modules/go/id/fn/main.go
+var badIDFnGoSrc string
+
+//go:embed testdata/modules/python/id/fn/src/main.py
+var badIDFnPySrc string
+
+func TestModuleReservedWords(t *testing.T) {
+	// verify disallowed names are rejected
+
+	t.Parallel()
+
+	c, ctx := connect(t)
+
+	t.Run("id", func(t *testing.T) {
+		t.Parallel()
+
+		t.Run("arg", func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("go", func(t *testing.T) {
+				t.Parallel()
+
+				_, err := c.Container().From(golangImage).
+					WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+					WithWorkdir("/work").
+					With(daggerExec("mod", "init", "--name=test", "--sdk=go")).
+					WithNewFile("/work/main.go", dagger.ContainerWithNewFileOpts{
+						Contents: badIDArgGoSrc,
+					}).
+					With(daggerQuery(`{test{fn(id:"no")}}`)).
+					Sync(ctx)
+				require.ErrorContains(t, err, "cannot define argument with reserved name \"id\"")
+			})
+
+			t.Run("python", func(t *testing.T) {
+				t.Parallel()
+
+				_, err := c.Container().From(golangImage).
+					WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+					WithWorkdir("/work").
+					With(daggerExec("mod", "init", "--name=test", "--sdk=python")).
+					WithNewFile("/work/src/main.py", dagger.ContainerWithNewFileOpts{
+						Contents: badIDArgPySrc,
+					}).
+					With(daggerQuery(`{test{fn(id:"no")}}`)).
+					Sync(ctx)
+				require.ErrorContains(t, err, "cannot define argument with reserved name \"id\"")
+			})
+		})
+
+		t.Run("field", func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("go", func(t *testing.T) {
+				t.Parallel()
+
+				_, err := c.Container().From(golangImage).
+					WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+					WithWorkdir("/work").
+					With(daggerExec("mod", "init", "--name=test", "--sdk=go")).
+					WithNewFile("/work/main.go", dagger.ContainerWithNewFileOpts{
+						Contents: badIDFieldGoSrc,
+					}).
+					With(daggerQuery(`{test{fn{id}}}`)).
+					Sync(ctx)
+				require.ErrorContains(t, err, "cannot define field with reserved name \"ID\"")
+			})
+		})
+
+		t.Run("fn", func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("go", func(t *testing.T) {
+				t.Parallel()
+
+				_, err := c.Container().From(golangImage).
+					WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+					WithWorkdir("/work").
+					With(daggerExec("mod", "init", "--name=test", "--sdk=go")).
+					WithNewFile("/work/main.go", dagger.ContainerWithNewFileOpts{
+						Contents: badIDFnGoSrc,
+					}).
+					With(daggerQuery(`{test{id}}`)).
+					Sync(ctx)
+				require.ErrorContains(t, err, "cannot define function with reserved name \"id\"")
+			})
+
+			t.Run("python", func(t *testing.T) {
+				t.Parallel()
+
+				_, err := c.Container().From(golangImage).
+					WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+					WithWorkdir("/work").
+					With(daggerExec("mod", "init", "--name=test", "--sdk=python")).
+					WithNewFile("/work/src/main.py", dagger.ContainerWithNewFileOpts{
+						Contents: badIDFnPySrc,
+					}).
+					With(daggerQuery(`{test{fn(id:"no")}}`)).
+					Sync(ctx)
+				require.ErrorContains(t, err, "cannot define function with reserved name \"id\"")
+			})
+		})
 	})
 }
 
@@ -1137,6 +2574,14 @@ func daggerQuery(query string) dagger.WithContainerFunc {
 	return func(c *dagger.Container) *dagger.Container {
 		return c.WithExec([]string{"dagger", "--debug", "query"}, dagger.ContainerWithExecOpts{
 			Stdin:                         query,
+			ExperimentalPrivilegedNesting: true,
+		})
+	}
+}
+
+func daggerCall(args ...string) dagger.WithContainerFunc {
+	return func(c *dagger.Container) *dagger.Container {
+		return c.WithExec(append([]string{"dagger", "--debug", "call"}, args...), dagger.ContainerWithExecOpts{
 			ExperimentalPrivilegedNesting: true,
 		})
 	}

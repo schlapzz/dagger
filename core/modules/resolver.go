@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"dagger.io/dagger"
+	"github.com/moby/buildkit/identity"
 )
 
 // Ref contains all of the information we're able to learn about a provided
@@ -41,6 +42,9 @@ func (ref *Ref) String() string {
 		}
 		return p
 	}
+
+	// don't include subpath, this is a git ref and Path already has any subpath included
+	// when set by ResolveMovingRef (which is confusing, needs a refactor)
 	if ref.Version == "" {
 		return ref.Path
 	}
@@ -143,10 +147,14 @@ func (ref *Ref) AsModule(ctx context.Context, c *dagger.Client) (*dagger.Module,
 		if strings.HasPrefix(rootPath, "..") {
 			return nil, fmt.Errorf("module config path %q is not under module root %q", ref.SubPath, rootPath)
 		}
+		relSubPath, err := filepath.Rel(rootPath, ref.SubPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get relative subpath: %w", err)
+		}
 
 		return c.Git(ref.Git.CloneURL).Commit(ref.Version).Tree().
 			Directory(rootPath).
-			AsModule(), nil
+			AsModule(dagger.DirectoryAsModuleOpts{SourceSubpath: relSubPath}), nil
 
 	default:
 		return nil, fmt.Errorf("invalid module (local=%t, git=%t)", ref.Local, ref.Git != nil)
@@ -253,7 +261,7 @@ func ResolveMovingRef(ctx context.Context, dag *dagger.Client, modQuery string) 
 		}
 	}
 
-	gitCommit, err := resolveGitRef(ctx, dag, ref.Git.CloneURL, modVersion)
+	gitCommit, err := dag.Git(ref.Git.CloneURL, dagger.GitOpts{KeepGitDir: true}).Commit(modVersion).Commit(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("resolve git ref: %w", err)
 	}
@@ -277,23 +285,29 @@ func ResolveModuleDependency(ctx context.Context, dag *dagger.Client, parent *Re
 		return nil, fmt.Errorf("failed to resolve module: %w", err)
 	}
 
-	if mod.Local {
-		// make local modules relative to the parent module
-		cp := *parent
-		if cp.SubPath != "" {
-			cp.SubPath = filepath.Join(cp.SubPath, mod.Path)
-		} else {
-			cp.SubPath = mod.Path
-		}
-		return &cp, nil
+	if !mod.Local {
+		return mod, nil
 	}
 
-	return mod, nil
+	// make local modules relative to the parent module
+	cp := *parent
+
+	if cp.Local {
+		cp.SubPath = filepath.Join(cp.SubPath, mod.Path)
+	} else {
+		// the parent is a git module, in which case both Path and SubPath include the full
+		// path to the module, so we need to set both (this is confusing and needs a larger refactor)
+		cp.SubPath = filepath.Join(cp.SubPath, mod.Path)
+		cp.Path = filepath.Join(cp.Path, mod.Path)
+	}
+
+	return &cp, nil
 }
 
 func defaultBranch(ctx context.Context, dag *dagger.Client, repo string) (string, error) {
 	output, err := dag.Container().
 		From("alpine/git").
+		WithEnvVariable("CACHEBUSTER", identity.NewID()). // force this to always run so we don't get stale data
 		WithExec([]string{"git", "ls-remote", "--symref", repo, "HEAD"}, dagger.ContainerWithExecOpts{
 			SkipEntrypoint: true,
 		}).
@@ -316,22 +330,4 @@ func defaultBranch(ctx context.Context, dag *dagger.Client, repo string) (string
 	}
 
 	return "", fmt.Errorf("could not deduce default branch from output:\n%s", output)
-}
-
-func resolveGitRef(ctx context.Context, dag *dagger.Client, repo, ref string) (string, error) {
-	repoDir := dag.Git(repo, dagger.GitOpts{KeepGitDir: true}).Commit(ref).Tree()
-
-	output, err := dag.Container().
-		From("alpine/git").
-		WithMountedDirectory("/repo", repoDir).
-		WithWorkdir("/repo").
-		WithExec([]string{"git", "rev-parse", "HEAD"}, dagger.ContainerWithExecOpts{
-			SkipEntrypoint: true,
-		}).
-		Stdout(ctx)
-	if err != nil {
-		return "", err
-	}
-
-	return strings.TrimSpace(output), nil
 }

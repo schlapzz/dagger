@@ -564,10 +564,6 @@ export type FileExportOpts = {
  */
 export type FileID = string & { __FileID: never }
 
-export type FunctionCallOpts = {
-  input?: FunctionCallInput[]
-}
-
 export type FunctionWithArgOpts = {
   /**
    * A doc string for the argument, if any
@@ -584,18 +580,6 @@ export type FunctionWithArgOpts = {
  * A reference to a FunctionArg.
  */
 export type FunctionArgID = string & { __FunctionArgID: never }
-
-export type FunctionCallInput = {
-  /**
-   * The name of the argument to the function
-   */
-  name: string
-
-  /**
-   * The value of the argument represented as a string of the JSON serialization.
-   */
-  value: JSON
-}
 
 /**
  * A reference to a Function.
@@ -750,6 +734,16 @@ export type ClientGitOpts = {
    * Set to true to keep .git directory.
    */
   keepGitDir?: boolean
+
+  /**
+   * Set SSH known hosts
+   */
+  sshKnownHosts?: string
+
+  /**
+   * Set SSH auth socket
+   */
+  sshAuthSocket?: Socket
 
   /**
    * A service which must be started before the repo is fetched.
@@ -1186,6 +1180,45 @@ export class Container extends BaseClient {
           r.value
         )
     )
+  }
+
+  /**
+   * EXPERIMENTAL API! Subject to change/removal at any time.
+   *
+   * experimentalWithAllGPUs configures all available GPUs on the host to be accessible to this container.
+   * This currently works for Nvidia devices only.
+   */
+  experimentalWithAllGPUs(): Container {
+    return new Container({
+      queryTree: [
+        ...this._queryTree,
+        {
+          operation: "experimentalWithAllGPUs",
+        },
+      ],
+      host: this.clientHost,
+      sessionToken: this.sessionToken,
+    })
+  }
+
+  /**
+   * EXPERIMENTAL API! Subject to change/removal at any time.
+   *
+   * experimentalWithGPU configures the provided list of devices to be accesible to this container.
+   * This currently works for Nvidia devices only.
+   */
+  experimentalWithGPU(devices: string[]): Container {
+    return new Container({
+      queryTree: [
+        ...this._queryTree,
+        {
+          operation: "experimentalWithGPU",
+          args: { devices },
+        },
+      ],
+      host: this.clientHost,
+      sessionToken: this.sessionToken,
+    })
   }
 
   /**
@@ -2545,6 +2578,25 @@ export class Directory extends BaseClient {
   }
 
   /**
+   * Returns a list of files and directories that matche the given pattern.
+   * @param pattern Pattern to match (e.g., "*.md").
+   */
+  async glob(pattern: string): Promise<string[]> {
+    const response: Awaited<string[]> = await computeQuery(
+      [
+        ...this._queryTree,
+        {
+          operation: "glob",
+          args: { pattern },
+        },
+      ],
+      this.client
+    )
+
+    return response
+  }
+
+  /**
    * Creates a named sub-pipeline
    * @param name Pipeline name.
    * @param opts.description Pipeline description.
@@ -3067,7 +3119,6 @@ export class File extends BaseClient {
  */
 export class Function_ extends BaseClient {
   private readonly _id?: FunctionID = undefined
-  private readonly _call?: JSON = undefined
   private readonly _description?: string = undefined
   private readonly _name?: string = undefined
 
@@ -3077,14 +3128,12 @@ export class Function_ extends BaseClient {
   constructor(
     parent?: { queryTree?: QueryTree[]; host?: string; sessionToken?: string },
     _id?: FunctionID,
-    _call?: JSON,
     _description?: string,
     _name?: string
   ) {
     super(parent)
 
     this._id = _id
-    this._call = _call
     this._description = _description
     this._name = _name
   }
@@ -3142,34 +3191,6 @@ export class Function_ extends BaseClient {
           r.id
         )
     )
-  }
-
-  /**
-   * Execute this function using dynamic input+output types.
-   *
-   * Typically, it's preferable to invoke a function using a type
-   * safe graphql query rather than using this call field. However,
-   * call is useful for some advanced use cases where dynamically
-   * loading arbitrary modules and invoking functions in them is
-   * required.
-   */
-  async call(opts?: FunctionCallOpts): Promise<JSON> {
-    if (this._call) {
-      return this._call
-    }
-
-    const response: Awaited<JSON> = await computeQuery(
-      [
-        ...this._queryTree,
-        {
-          operation: "call",
-          args: { ...opts },
-        },
-      ],
-      this.client
-    )
-
-    return response
   }
 
   /**
@@ -3753,15 +3774,39 @@ export class GeneratedCode extends BaseClient {
  * A git ref (tag, branch or commit).
  */
 export class GitRef extends BaseClient {
+  private readonly _commit?: string = undefined
+
   /**
    * Constructor is used for internal usage only, do not create object from it.
    */
-  constructor(parent?: {
-    queryTree?: QueryTree[]
-    host?: string
-    sessionToken?: string
-  }) {
+  constructor(
+    parent?: { queryTree?: QueryTree[]; host?: string; sessionToken?: string },
+    _commit?: string
+  ) {
     super(parent)
+
+    this._commit = _commit
+  }
+
+  /**
+   * The resolved commit id at this ref.
+   */
+  async commit(): Promise<string> {
+    if (this._commit) {
+      return this._commit
+    }
+
+    const response: Awaited<string> = await computeQuery(
+      [
+        ...this._queryTree,
+        {
+          operation: "commit",
+        },
+      ],
+      this.client
+    )
+
+    return response
   }
 
   /**
@@ -4958,9 +5003,11 @@ export class Client extends BaseClient {
   /**
    * Queries a git repository.
    * @param url Url of the git repository.
-   * Can be formatted as https://{host}/{owner}/{repo}, git@{host}/{owner}/{repo}
+   * Can be formatted as https://{host}/{owner}/{repo}, git@{host}:{owner}/{repo}
    * Suffix ".git" is optional.
    * @param opts.keepGitDir Set to true to keep .git directory.
+   * @param opts.sshKnownHosts Set SSH known hosts
+   * @param opts.sshAuthSocket Set SSH auth socket
    * @param opts.experimentalServiceHost A service which must be started before the repo is fetched.
    */
   git(url: string, opts?: ClientGitOpts): GitRepository {

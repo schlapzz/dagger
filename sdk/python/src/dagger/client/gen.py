@@ -164,15 +164,6 @@ class BuildArg(Input):
 
 
 @dataclass(slots=True)
-class FunctionCallInput(Input):
-    name: str
-    """The name of the argument to the function"""
-
-    value: JSON
-    """The value of the argument represented as a string of the JSON serialization."""
-
-
-@dataclass(slots=True)
 class PipelineLabel(Input):
     """Key value object that represents a Pipeline label."""
 
@@ -427,6 +418,32 @@ class Container(Type):
             _value="value",
         )
         return await _ctx.execute(list[EnvVariable])
+
+    @typecheck
+    def experimental_with_all_gp_us(self) -> "Container":
+        """EXPERIMENTAL API! Subject to change/removal at any time.
+
+        experimentalWithAllGPUs configures all available GPUs on the host to
+        be accessible to this container.
+        This currently works for Nvidia devices only.
+        """
+        _args: list[Arg] = []
+        _ctx = self._select("experimentalWithAllGPUs", _args)
+        return Container(_ctx)
+
+    @typecheck
+    def experimental_with_gpu(self, devices: Sequence[str]) -> "Container":
+        """EXPERIMENTAL API! Subject to change/removal at any time.
+
+        experimentalWithGPU configures the provided list of devices to be
+        accesible to this container.
+        This currently works for Nvidia devices only.
+        """
+        _args = [
+            Arg("devices", devices),
+        ]
+        _ctx = self._select("experimentalWithGPU", _args)
+        return Container(_ctx)
 
     @typecheck
     async def export(
@@ -1838,6 +1855,35 @@ class Directory(Type):
         return File(_ctx)
 
     @typecheck
+    async def glob(self, pattern: str) -> list[str]:
+        """Returns a list of files and directories that matche the given pattern.
+
+        Parameters
+        ----------
+        pattern:
+            Pattern to match (e.g., "*.md").
+
+        Returns
+        -------
+        list[str]
+            The `String` scalar type represents textual data, represented as
+            UTF-8 character sequences. The String type is most often used by
+            GraphQL to represent free-form human-readable text.
+
+        Raises
+        ------
+        ExecuteTimeoutError
+            If the time to execute the query exceeds the configured timeout.
+        QueryError
+            If the API returns an error.
+        """
+        _args = [
+            Arg("pattern", pattern),
+        ]
+        _ctx = self._select("glob", _args)
+        return await _ctx.execute(list[str])
+
+    @typecheck
     async def id(self) -> DirectoryID:
         """The content-addressed identifier of the directory.
 
@@ -2386,12 +2432,10 @@ class Function(Type):
     arguments."""
 
     __slots__ = (
-        "_call",
         "_description",
         "_name",
     )
 
-    _call: Optional[JSON]
     _description: Optional[str]
     _name: Optional[str]
 
@@ -2406,40 +2450,6 @@ class Function(Type):
             _name="name",
         )
         return await _ctx.execute(list[FunctionArg])
-
-    @typecheck
-    async def call(
-        self,
-        *,
-        input: Optional[Sequence[FunctionCallInput]] = None,
-    ) -> JSON:
-        """Execute this function using dynamic input+output types.
-
-        Typically, it's preferable to invoke a function using a type
-        safe graphql query rather than using this call field. However,
-        call is useful for some advanced use cases where dynamically
-        loading arbitrary modules and invoking functions in them is
-        required.
-
-        Returns
-        -------
-        JSON
-            An arbitrary JSON-encoded value.
-
-        Raises
-        ------
-        ExecuteTimeoutError
-            If the time to execute the query exceeds the configured timeout.
-        QueryError
-            If the API returns an error.
-        """
-        if hasattr(self, "_call"):
-            return self._call
-        _args = [
-            Arg("input", input, None),
-        ]
-        _ctx = self._select("call", _args)
-        return await _ctx.execute(JSON)
 
     @typecheck
     async def description(self) -> Optional[str]:
@@ -2979,6 +2989,28 @@ class GeneratedCode(Type):
 
 class GitRef(Type):
     """A git ref (tag, branch or commit)."""
+
+    @typecheck
+    async def commit(self) -> str:
+        """The resolved commit id at this ref.
+
+        Returns
+        -------
+        str
+            The `String` scalar type represents textual data, represented as
+            UTF-8 character sequences. The String type is most often used by
+            GraphQL to represent free-form human-readable text.
+
+        Raises
+        ------
+        ExecuteTimeoutError
+            If the time to execute the query exceeds the configured timeout.
+        QueryError
+            If the API returns an error.
+        """
+        _args: list[Arg] = []
+        _ctx = self._select("commit", _args)
+        return await _ctx.execute(str)
 
     @typecheck
     def tree(
@@ -3702,7 +3734,6 @@ class ObjectTypeDef(Type):
         _args: list[Arg] = []
         _ctx = self._select("functions", _args)
         _ctx = Function(_ctx)._select_multiple(
-            _call="call",
             _description="description",
             _name="name",
         )
@@ -3980,6 +4011,8 @@ class Client(Root):
         url: str,
         *,
         keep_git_dir: Optional[bool] = None,
+        ssh_known_hosts: Optional[str] = None,
+        ssh_auth_socket: Optional["Socket"] = None,
         experimental_service_host: Optional["Service"] = None,
     ) -> GitRepository:
         """Queries a git repository.
@@ -3989,16 +4022,22 @@ class Client(Root):
         url:
             Url of the git repository.
             Can be formatted as https://{host}/{owner}/{repo},
-            git@{host}/{owner}/{repo}
+            git@{host}:{owner}/{repo}
             Suffix ".git" is optional.
         keep_git_dir:
             Set to true to keep .git directory.
+        ssh_known_hosts:
+            Set SSH known hosts
+        ssh_auth_socket:
+            Set SSH auth socket
         experimental_service_host:
             A service which must be started before the repo is fetched.
         """
         _args = [
             Arg("url", url),
             Arg("keepGitDir", keep_git_dir, None),
+            Arg("sshKnownHosts", ssh_known_hosts, None),
+            Arg("sshAuthSocket", ssh_auth_socket, None),
             Arg("experimentalServiceHost", experimental_service_host, None),
         ]
         _ctx = self._select("git", _args)
@@ -4765,7 +4804,6 @@ __all__ = [
     "FunctionArgID",
     "FunctionCall",
     "FunctionCallArgValue",
-    "FunctionCallInput",
     "FunctionID",
     "GeneratedCode",
     "GeneratedCodeID",

@@ -267,11 +267,6 @@ pub struct BuildArg {
     pub value: String,
 }
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
-pub struct FunctionCallInput {
-    pub name: String,
-    pub value: Json,
-}
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub struct PipelineLabel {
     pub name: String,
     pub value: String,
@@ -685,6 +680,35 @@ impl Container {
             selection: query,
             graphql_client: self.graphql_client.clone(),
         }];
+    }
+    /// EXPERIMENTAL API! Subject to change/removal at any time.
+    /// experimentalWithAllGPUs configures all available GPUs on the host to be accessible to this container.
+    /// This currently works for Nvidia devices only.
+    pub fn experimental_with_all_gp_us(&self) -> Container {
+        let query = self.selection.select("experimentalWithAllGPUs");
+        return Container {
+            proc: self.proc.clone(),
+            selection: query,
+            graphql_client: self.graphql_client.clone(),
+        };
+    }
+    /// EXPERIMENTAL API! Subject to change/removal at any time.
+    /// experimentalWithGPU configures the provided list of devices to be accesible to this container.
+    /// This currently works for Nvidia devices only.
+    pub fn experimental_with_gpu(&self, devices: Vec<impl Into<String>>) -> Container {
+        let mut query = self.selection.select("experimentalWithGPU");
+        query = query.arg(
+            "devices",
+            devices
+                .into_iter()
+                .map(|i| i.into())
+                .collect::<Vec<String>>(),
+        );
+        return Container {
+            proc: self.proc.clone(),
+            selection: query,
+            graphql_client: self.graphql_client.clone(),
+        };
     }
     /// Writes the container as an OCI tarball to the destination file path on the host for the specified platform variants.
     /// Return true on success.
@@ -2141,6 +2165,16 @@ impl Directory {
             graphql_client: self.graphql_client.clone(),
         };
     }
+    /// Returns a list of files and directories that matche the given pattern.
+    ///
+    /// # Arguments
+    ///
+    /// * `pattern` - Pattern to match (e.g., "*.md").
+    pub async fn glob(&self, pattern: impl Into<String>) -> Result<Vec<String>, DaggerError> {
+        let mut query = self.selection.select("glob");
+        query = query.arg("pattern", pattern.into());
+        query.execute(self.graphql_client.clone()).await
+    }
     /// The content-addressed identifier of the directory.
     pub async fn id(&self) -> Result<DirectoryId, DaggerError> {
         let query = self.selection.select("id");
@@ -2558,11 +2592,6 @@ pub struct Function {
     pub graphql_client: DynGraphQLClient,
 }
 #[derive(Builder, Debug, PartialEq)]
-pub struct FunctionCallOpts {
-    #[builder(setter(into, strip_option), default)]
-    pub input: Option<Vec<FunctionCallInput>>,
-}
-#[derive(Builder, Debug, PartialEq)]
 pub struct FunctionWithArgOpts<'a> {
     /// A default value to use for this argument if not explicitly set by the caller, if any
     #[builder(setter(into, strip_option), default)]
@@ -2580,37 +2609,6 @@ impl Function {
             selection: query,
             graphql_client: self.graphql_client.clone(),
         }];
-    }
-    /// Execute this function using dynamic input+output types.
-    /// Typically, it's preferable to invoke a function using a type
-    /// safe graphql query rather than using this call field. However,
-    /// call is useful for some advanced use cases where dynamically
-    /// loading arbitrary modules and invoking functions in them is
-    /// required.
-    ///
-    /// # Arguments
-    ///
-    /// * `opt` - optional argument, see inner type for documentation, use <func>_opts to use
-    pub async fn call(&self) -> Result<Json, DaggerError> {
-        let query = self.selection.select("call");
-        query.execute(self.graphql_client.clone()).await
-    }
-    /// Execute this function using dynamic input+output types.
-    /// Typically, it's preferable to invoke a function using a type
-    /// safe graphql query rather than using this call field. However,
-    /// call is useful for some advanced use cases where dynamically
-    /// loading arbitrary modules and invoking functions in them is
-    /// required.
-    ///
-    /// # Arguments
-    ///
-    /// * `opt` - optional argument, see inner type for documentation, use <func>_opts to use
-    pub async fn call_opts(&self, opts: FunctionCallOpts) -> Result<Json, DaggerError> {
-        let mut query = self.selection.select("call");
-        if let Some(input) = opts.input {
-            query = query.arg("input", input);
-        }
-        query.execute(self.graphql_client.clone()).await
     }
     /// A doc string for the function, if any
     pub async fn description(&self) -> Result<String, DaggerError> {
@@ -2871,6 +2869,11 @@ pub struct GitRefTreeOpts<'a> {
     pub ssh_known_hosts: Option<&'a str>,
 }
 impl GitRef {
+    /// The resolved commit id at this ref.
+    pub async fn commit(&self) -> Result<String, DaggerError> {
+        let query = self.selection.select("commit");
+        query.execute(self.graphql_client.clone()).await
+    }
     /// The filesystem tree at this ref.
     ///
     /// # Arguments
@@ -3418,13 +3421,19 @@ pub struct QueryDirectoryOpts {
     pub id: Option<DirectoryId>,
 }
 #[derive(Builder, Debug, PartialEq)]
-pub struct QueryGitOpts {
+pub struct QueryGitOpts<'a> {
     /// A service which must be started before the repo is fetched.
     #[builder(setter(into, strip_option), default)]
     pub experimental_service_host: Option<ServiceId>,
     /// Set to true to keep .git directory.
     #[builder(setter(into, strip_option), default)]
     pub keep_git_dir: Option<bool>,
+    /// Set SSH auth socket
+    #[builder(setter(into, strip_option), default)]
+    pub ssh_auth_socket: Option<SocketId>,
+    /// Set SSH known hosts
+    #[builder(setter(into, strip_option), default)]
+    pub ssh_known_hosts: Option<&'a str>,
 }
 #[derive(Builder, Debug, PartialEq)]
 pub struct QueryHttpOpts {
@@ -3624,7 +3633,7 @@ impl Query {
     /// # Arguments
     ///
     /// * `url` - Url of the git repository.
-    /// Can be formatted as https://{host}/{owner}/{repo}, git@{host}/{owner}/{repo}
+    /// Can be formatted as https://{host}/{owner}/{repo}, git@{host}:{owner}/{repo}
     /// Suffix ".git" is optional.
     /// * `opt` - optional argument, see inner type for documentation, use <func>_opts to use
     pub fn git(&self, url: impl Into<String>) -> GitRepository {
@@ -3641,14 +3650,20 @@ impl Query {
     /// # Arguments
     ///
     /// * `url` - Url of the git repository.
-    /// Can be formatted as https://{host}/{owner}/{repo}, git@{host}/{owner}/{repo}
+    /// Can be formatted as https://{host}/{owner}/{repo}, git@{host}:{owner}/{repo}
     /// Suffix ".git" is optional.
     /// * `opt` - optional argument, see inner type for documentation, use <func>_opts to use
-    pub fn git_opts(&self, url: impl Into<String>, opts: QueryGitOpts) -> GitRepository {
+    pub fn git_opts<'a>(&self, url: impl Into<String>, opts: QueryGitOpts<'a>) -> GitRepository {
         let mut query = self.selection.select("git");
         query = query.arg("url", url.into());
         if let Some(keep_git_dir) = opts.keep_git_dir {
             query = query.arg("keepGitDir", keep_git_dir);
+        }
+        if let Some(ssh_known_hosts) = opts.ssh_known_hosts {
+            query = query.arg("sshKnownHosts", ssh_known_hosts);
+        }
+        if let Some(ssh_auth_socket) = opts.ssh_auth_socket {
+            query = query.arg("sshAuthSocket", ssh_auth_socket);
         }
         if let Some(experimental_service_host) = opts.experimental_service_host {
             query = query.arg("experimentalServiceHost", experimental_service_host);

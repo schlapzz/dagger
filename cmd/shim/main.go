@@ -170,20 +170,6 @@ func pollForPort(network, addr string) (string, error) {
 }
 
 func shim() (returnExitCode int) {
-	cacheExitCodeStr, found := internalEnv("_DAGGER_CACHE_EXIT_CODE")
-	if found {
-		cacheExitCodeUint64, err := strconv.ParseUint(cacheExitCodeStr, 10, 32)
-		if err != nil {
-			panic(fmt.Errorf("cannot parse cache exit code: %w", err))
-		}
-		cacheExitCode := uint32(cacheExitCodeUint64)
-		defer func() {
-			if returnExitCode == int(cacheExitCode) {
-				returnExitCode = 0
-			}
-		}()
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if len(os.Args) < 2 {
@@ -382,6 +368,19 @@ func setupBundle() int {
 			Options:     []string{"rbind", "ro"},
 		})
 
+		spec.Hooks = &specs.Hooks{}
+		if gpuSupportEnabled := os.Getenv("_EXPERIMENTAL_DAGGER_GPU_SUPPORT"); gpuSupportEnabled != "" {
+			spec.Hooks.Prestart = []specs.Hook{
+				{
+					Args: []string{
+						"nvidia-container-runtime-hook",
+						"prestart",
+					},
+					Path: "/usr/bin/nvidia-container-runtime-hook",
+				},
+			}
+		}
+
 		// update the args to specify the shim as the init process
 		spec.Process.Args = append([]string{shimPath}, spec.Process.Args...)
 	}
@@ -437,6 +436,7 @@ func setupBundle() int {
 		}
 	}
 
+	var gpuParams string
 	keepEnv := []string{}
 	for _, env := range spec.Process.Env {
 		switch {
@@ -449,8 +449,6 @@ func setupBundle() int {
 				return errorExitCode
 			}
 			keepEnv = append(keepEnv, "_DAGGER_SERVER_ID="+execMetadata.ServerID)
-			keepEnv = append(keepEnv, "_DAGGER_MODULE_DIGEST="+execMetadata.ModuleDigest.String())
-			keepEnv = append(keepEnv, "_DAGGER_FUNCTION_CONTEXT_DIGEST="+execMetadata.FunctionContextDigest.String())
 
 			// mount buildkit sock since it's nesting
 			spec.Mounts = append(spec.Mounts, specs.Mount{
@@ -486,11 +484,18 @@ func setupBundle() int {
 				fmt.Fprintln(os.Stderr, "host alias:", err)
 				return errorExitCode
 			}
+		case strings.HasPrefix(env, "_EXPERIMENTAL_DAGGER_GPU_PARAMS"):
+			splits := strings.Split(env, "=")
+			gpuParams = splits[1]
 		default:
 			keepEnv = append(keepEnv, env)
 		}
 	}
 	spec.Process.Env = keepEnv
+
+	if gpuParams != "" {
+		spec.Process.Env = append(spec.Process.Env, fmt.Sprintf("NVIDIA_VISIBLE_DEVICES=%s", gpuParams))
+	}
 
 	// write the updated config
 	configBytes, err = json.Marshal(spec)
@@ -646,24 +651,25 @@ func runWithNesting(ctx context.Context, cmd *exec.Cmd) error {
 	}
 	sessionPort := l.Addr().(*net.TCPAddr).Port
 
-	serverID, ok := internalEnv("_DAGGER_SERVER_ID")
-	if !ok {
-		return fmt.Errorf("missing _DAGGER_SERVER_ID")
-	}
 	parentClientIDsVal, _ := internalEnv("_DAGGER_PARENT_CLIENT_IDS")
+
 	clientParams := client.Params{
-		ServerID:        serverID,
 		SecretToken:     sessionToken.String(),
 		RunnerHost:      "unix:///.runner.sock",
 		ParentClientIDs: strings.Fields(parentClientIDsVal),
 	}
-	moduleDigest, ok := internalEnv("_DAGGER_MODULE_DIGEST")
-	if ok {
-		clientParams.ModuleDigest = digest.Digest(moduleDigest)
+
+	if _, ok := internalEnv("_DAGGER_ENABLE_NESTING_IN_SAME_SESSION"); ok {
+		serverID, ok := internalEnv("_DAGGER_SERVER_ID")
+		if !ok {
+			return fmt.Errorf("missing _DAGGER_SERVER_ID")
+		}
+		clientParams.ServerID = serverID
 	}
-	functionContextDigest, ok := internalEnv("_DAGGER_FUNCTION_CONTEXT_DIGEST")
+
+	moduleContextDigest, ok := internalEnv("_DAGGER_MODULE_CONTEXT_DIGEST")
 	if ok {
-		clientParams.FunctionContextDigest = digest.Digest(functionContextDigest)
+		clientParams.ModuleContextDigest = digest.Digest(moduleContextDigest)
 	}
 
 	progW, err := progrock.DialRPC(ctx, "unix:///.progrock.sock")

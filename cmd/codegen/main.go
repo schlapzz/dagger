@@ -14,15 +14,21 @@ import (
 )
 
 var (
-	outputDir     string
-	moduleRef     string
-	lang          string
-	propagateLogs bool
+	outputDir             string
+	moduleRef             string
+	lang                  string
+	propagateLogs         bool
+	introspectionJSONPath string
 )
 
 var rootCmd = &cobra.Command{
 	Use:  "codegen",
 	RunE: ClientGen,
+	PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		// if we got this far, CLI parsing worked just fine; no
+		// need to show usage for runtime errors
+		cmd.SilenceUsage = true
+	},
 }
 
 func init() {
@@ -30,6 +36,7 @@ func init() {
 	rootCmd.Flags().StringVarP(&outputDir, "output", "o", ".", "output directory")
 	rootCmd.Flags().StringVar(&moduleRef, "module", "", "module to load and codegen dependency code")
 	rootCmd.Flags().BoolVar(&propagateLogs, "propagate-logs", false, "propagate logs directly to progrock.sock")
+	rootCmd.Flags().StringVar(&introspectionJSONPath, "introspection-json-path", "", "optional path to file containing pre-computed graphql introspection JSON")
 }
 
 const nestedSock = "/.progrock.sock"
@@ -45,8 +52,8 @@ func ClientGen(cmd *cobra.Command, args []string) error {
 	var dialErr error
 	if propagateLogs {
 		progW, dialErr = progrock.DialRPC(ctx, "unix://"+nestedSock)
-		if err != nil {
-			return fmt.Errorf("error connecting to progrock: %w", err)
+		if dialErr != nil {
+			return fmt.Errorf("error connecting to progrock: %w; falling back to console output", dialErr)
 		}
 	} else {
 		progW = console.NewWriter(os.Stderr, console.WithMessageLevel(progrock.MessageLevel_DEBUG))
@@ -54,11 +61,7 @@ func ClientGen(cmd *cobra.Command, args []string) error {
 
 	rec := progrock.NewRecorder(progW)
 	defer rec.Complete()
-
-	if dialErr != nil {
-		rec.Warn("could not dial progrock.sock; falling back to console output",
-			progrock.ErrorLabel(dialErr))
-	}
+	defer rec.Close()
 
 	ctx = progrock.ToContext(ctx, rec)
 
@@ -83,12 +86,19 @@ func ClientGen(cmd *cobra.Command, args []string) error {
 		cfg.ModuleConfig = modCfg
 	}
 
+	if introspectionJSONPath != "" {
+		introspectionJSON, err := os.ReadFile(introspectionJSONPath)
+		if err != nil {
+			return fmt.Errorf("read introspection json: %w", err)
+		}
+		cfg.IntrospectionJSON = string(introspectionJSON)
+	}
+
 	return Generate(ctx, cfg, dag)
 }
 
 func main() {
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"dagger.io/dagger"
 )
@@ -79,6 +80,7 @@ func RepositoryGoCodeOnly(c *dagger.Client) *dagger.Directory {
 			"**/README.md", // needed for examples test
 			"**/help.txt",  // needed for linting module bootstrap code
 			"sdk/go/codegen/generator/nodejs/templates/src/testdata/**/*",
+			"core/integration/testdata/**/*",
 
 			// Go SDK runtime codegen
 			"**/dagger.json",
@@ -190,4 +192,14 @@ func GetHostEnv(name string) string {
 		os.Exit(1)
 	}
 	return value
+}
+
+func ShellCmd(cmd string) dagger.WithContainerFunc {
+	return func(ctr *dagger.Container) *dagger.Container {
+		return ctr.WithExec([]string{"sh", "-c", cmd})
+	}
+}
+
+func ShellCmds(cmds ...string) dagger.WithContainerFunc {
+	return ShellCmd(strings.Join(cmds, " && "))
 }

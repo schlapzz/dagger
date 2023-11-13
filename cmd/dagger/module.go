@@ -4,14 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"dagger.io/dagger"
 	"github.com/dagger/dagger/core/modules"
 	"github.com/dagger/dagger/engine/client"
+	"github.com/go-git/go-git/v5"
+	"github.com/iancoleman/strcase"
+	"github.com/moby/buildkit/util/gitutil"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/vito/progrock"
@@ -21,10 +26,13 @@ var (
 	moduleURL   string
 	moduleFlags = pflag.NewFlagSet("module", pflag.ContinueOnError)
 
-	sdk string
+	sdk       string
+	licenseID string
 
 	moduleName string
 	moduleRoot string
+
+	force bool
 )
 
 const (
@@ -32,25 +40,29 @@ const (
 )
 
 func init() {
-	moduleFlags.StringVarP(&moduleURL, "mod", "m", "", "Path to dagger.json config file for the module or a directory containing that file. Either local path (e.g. \"/path/to/some/dir\") or a git repo (e.g. \"git://github.com/dagger/dagger?ref=branch?subpath=path/to/some/dir\").")
+	moduleFlags.StringVarP(&moduleURL, "mod", "m", "", "Path to dagger.json config file for the module or a directory containing that file. Either local path (e.g. \"/path/to/some/dir\") or a github repo (e.g. \"github.com/dagger/dagger/path/to/some/subdir\").")
 	moduleFlags.BoolVar(&focus, "focus", true, "Only show output for focused commands.")
 
 	moduleCmd.PersistentFlags().AddFlagSet(moduleFlags)
 	listenCmd.PersistentFlags().AddFlagSet(moduleFlags)
 	queryCmd.PersistentFlags().AddFlagSet(moduleFlags)
-	callCmd.PersistentFlags().AddFlagSet(moduleFlags)
-	shellCmd.PersistentFlags().AddFlagSet(moduleFlags)
+	funcCmds.AddFlagSet(moduleFlags)
 
 	moduleInitCmd.PersistentFlags().StringVar(&sdk, "sdk", "", "SDK name or image ref to use for the module")
 	moduleInitCmd.MarkPersistentFlagRequired("sdk")
 	moduleInitCmd.PersistentFlags().StringVar(&moduleName, "name", "", "Name of the new module")
 	moduleInitCmd.MarkPersistentFlagRequired("name")
+	moduleInitCmd.PersistentFlags().StringVar(&licenseID, "license", "", "License identifier to generate - see https://spdx.org/licenses/")
 	moduleInitCmd.PersistentFlags().StringVarP(&moduleRoot, "root", "", "", "Root directory that should be loaded for the full module context. Defaults to the parent directory containing dagger.json.")
+
+	modulePublishCmd.PersistentFlags().BoolVarP(&force, "force", "f", false, "Force publish even if the git repository is not clean.")
+
 	// also include codegen flags since codegen will run on module init
 
 	moduleCmd.AddCommand(moduleInitCmd)
-	moduleCmd.AddCommand(moduleUseCmd)
+	moduleCmd.AddCommand(moduleInstallCmd)
 	moduleCmd.AddCommand(moduleSyncCmd)
+	moduleCmd.AddCommand(modulePublishCmd)
 }
 
 var moduleCmd = &cobra.Command{
@@ -63,7 +75,7 @@ var moduleCmd = &cobra.Command{
 		ctx := cmd.Context()
 
 		return withEngineAndTUI(ctx, client.Params{}, func(ctx context.Context, engineClient *client.Client) (err error) {
-			mod, _, err := getModuleFlagConfig(ctx, engineClient.Dagger())
+			mod, _, err := getModuleRef(ctx, engineClient.Dagger())
 			if err != nil {
 				return fmt.Errorf("failed to get module: %w", err)
 			}
@@ -104,64 +116,51 @@ var moduleInitCmd = &cobra.Command{
 
 		return withEngineAndTUI(ctx, client.Params{}, func(ctx context.Context, engineClient *client.Client) (err error) {
 			dag := engineClient.Dagger()
-
-			mod, _, err := getModuleFlagConfig(ctx, dag)
+			ref, _, err := getModuleRef(ctx, dag)
 			if err != nil {
 				return fmt.Errorf("failed to get module: %w", err)
 			}
-
-			if mod.Git != nil {
-				return fmt.Errorf("module init is not supported for git modules")
+			moduleDir, err := ref.LocalSourcePath()
+			if err != nil {
+				return fmt.Errorf("module init is only supported for local modules")
 			}
-
-			if exists, err := mod.modExists(ctx, nil); err == nil && exists {
-				return fmt.Errorf("module init config path already exists: %s", mod.Path)
+			if _, err := ref.Config(ctx, nil); err == nil {
+				return fmt.Errorf("module init config path already exists: %s", ref.Path)
 			}
-
+			if err := findOrCreateLicense(ctx, moduleDir); err != nil {
+				return err
+			}
 			cfg := modules.NewConfig(moduleName, sdk, moduleRoot)
-			return updateModuleConfig(ctx, engineClient, mod, cfg, cmd)
+			return updateModuleConfig(ctx, dag, moduleDir, ref, cfg, cmd)
 		})
 	},
 }
 
-var moduleUseCmd = &cobra.Command{
-	Use:    "use",
-	Short:  "Add a new dependency to a dagger module",
-	Hidden: false,
+var moduleInstallCmd = &cobra.Command{
+	Use:     "install",
+	Aliases: []string{"use"},
+	Short:   "Add a new dependency to a dagger module",
+	Hidden:  false,
 	RunE: func(cmd *cobra.Command, extraArgs []string) (rerr error) {
 		ctx := cmd.Context()
 		return withEngineAndTUI(ctx, client.Params{}, func(ctx context.Context, engineClient *client.Client) (err error) {
-			modFlagCfg, _, err := getModuleFlagConfig(ctx, engineClient.Dagger())
+			dag := engineClient.Dagger()
+			ref, _, err := getModuleRef(ctx, dag)
 			if err != nil {
 				return fmt.Errorf("failed to get module: %w", err)
 			}
-			if modFlagCfg.Git != nil {
-				return fmt.Errorf("module use is not supported for git modules")
+			moduleDir, err := ref.LocalSourcePath()
+			if err != nil {
+				return fmt.Errorf("module use is only supported for local modules")
 			}
-			modCfg, err := modFlagCfg.Config(ctx, engineClient.Dagger())
+			modCfg, err := ref.Config(ctx, dag)
 			if err != nil {
 				return fmt.Errorf("failed to get module config: %w", err)
 			}
-
-			var deps []string
-			deps = append(deps, modCfg.Dependencies...)
-			deps = append(deps, extraArgs...)
-			depSet := make(map[string]*modules.Ref)
-			for _, dep := range deps {
-				depMod, err := modules.ResolveModuleDependency(ctx, engineClient.Dagger(), modFlagCfg.Ref, dep)
-				if err != nil {
-					return fmt.Errorf("failed to get module: %w", err)
-				}
-				depSet[depMod.Symbolic()] = depMod
+			if err := modCfg.Use(ctx, dag, ref, extraArgs...); err != nil {
+				return fmt.Errorf("failed to add module dependency: %w", err)
 			}
-
-			modCfg.Dependencies = nil
-			for _, dep := range depSet {
-				modCfg.Dependencies = append(modCfg.Dependencies, dep.String())
-			}
-			sort.Strings(modCfg.Dependencies)
-
-			return updateModuleConfig(ctx, engineClient, modFlagCfg, modCfg, cmd)
+			return updateModuleConfig(ctx, dag, moduleDir, ref, modCfg, cmd)
 		})
 	},
 }
@@ -173,41 +172,144 @@ var moduleSyncCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, extraArgs []string) (rerr error) {
 		ctx := cmd.Context()
 		return withEngineAndTUI(ctx, client.Params{}, func(ctx context.Context, engineClient *client.Client) (err error) {
-			modFlagCfg, _, err := getModuleFlagConfig(ctx, engineClient.Dagger())
+			dag := engineClient.Dagger()
+			ref, _, err := getModuleRef(ctx, dag)
 			if err != nil {
 				return fmt.Errorf("failed to get module: %w", err)
 			}
-			if modFlagCfg.Git != nil {
-				return fmt.Errorf("module sync is not supported for git modules")
+			moduleDir, err := ref.LocalSourcePath()
+			if err != nil {
+				return fmt.Errorf("module sync is only supported for local modules")
 			}
-			modCfg, err := modFlagCfg.Config(ctx, engineClient.Dagger())
+			modCfg, err := ref.Config(ctx, dag)
 			if err != nil {
 				return fmt.Errorf("failed to get module config: %w", err)
 			}
-			return updateModuleConfig(ctx, engineClient, modFlagCfg, modCfg, cmd)
+			return updateModuleConfig(ctx, dag, moduleDir, ref, modCfg, cmd)
 		})
 	},
 }
 
+const daDaggerverse = "https://daggerverse.dev"
+
+var modulePublishCmd = &cobra.Command{
+	Use:    "publish",
+	Short:  fmt.Sprintf("Publish your module to The Daggerverse (%s)", daDaggerverse),
+	Hidden: false,
+	RunE: func(cmd *cobra.Command, extraArgs []string) (rerr error) {
+		ctx := cmd.Context()
+		return withEngineAndTUI(ctx, client.Params{}, func(ctx context.Context, engineClient *client.Client) (err error) {
+			rec := progrock.FromContext(ctx)
+
+			vtx := rec.Vertex("publish", strings.Join(os.Args, " "), progrock.Focused())
+			defer func() { vtx.Done(err) }()
+			cmd.SetOut(vtx.Stdout())
+			cmd.SetErr(vtx.Stderr())
+
+			dag := engineClient.Dagger()
+			ref, _, err := getModuleRef(ctx, dag)
+			if err != nil {
+				return fmt.Errorf("failed to get module: %w", err)
+			}
+			moduleDir, err := ref.LocalSourcePath()
+			if err != nil {
+				return fmt.Errorf("module publish is only supported for local modules")
+			}
+			repo, err := git.PlainOpenWithOptions(moduleDir, &git.PlainOpenOptions{
+				DetectDotGit: true,
+			})
+			if err != nil {
+				return fmt.Errorf("failed to open git repo: %w", err)
+			}
+			wt, err := repo.Worktree()
+			if err != nil {
+				return fmt.Errorf("failed to get git worktree: %w", err)
+			}
+			st, err := wt.Status()
+			if err != nil {
+				return fmt.Errorf("failed to get git status: %w", err)
+			}
+			head, err := repo.Head()
+			if err != nil {
+				return fmt.Errorf("failed to get git HEAD: %w", err)
+			}
+			commit := head.Hash()
+
+			rec.Debug("git commit", progrock.Labelf("commit", commit.String()))
+
+			orig, err := repo.Remote("origin")
+			if err != nil {
+				return fmt.Errorf("failed to get git remote: %w", err)
+			}
+			refPath, err := originToPath(orig.Config().URLs[0])
+			if err != nil {
+				return fmt.Errorf("failed to get module path: %w", err)
+			}
+
+			// calculate path relative to repo root
+			gitRoot := wt.Filesystem.Root()
+			absModDir, err := filepath.Abs(moduleDir)
+			if err != nil {
+				return fmt.Errorf("failed to get absolute module dir: %w", err)
+			}
+			pathFromRoot, err := filepath.Rel(gitRoot, absModDir)
+			if err != nil {
+				return fmt.Errorf("failed to get path from git root: %w", err)
+			}
+
+			// NB: you might think to ignore changes to files outside of the module,
+			// but we should probably play it safe. in a monorepo for example this
+			// could mean publishing a broken module because it depends on
+			// uncommitted code in a dependent module.
+			//
+			// TODO: the proper fix here might be to check for dependent code, too.
+			// Specifically I should be able to publish a dependency before
+			// committing + pushing its dependers. but in the end it doesn't really
+			// matter; just commit everything and _then_ publish.
+			if !st.IsClean() && !force {
+				cmd.Println(st)
+				return fmt.Errorf("git repository is not clean; run with --force to ignore")
+			}
+
+			refStr := fmt.Sprintf("%s@%s", path.Join(refPath, pathFromRoot), commit)
+
+			cmd.Println("publishing", refStr, "to", daDaggerverse)
+
+			modURL, err := url.JoinPath(daDaggerverse, "mod", refStr)
+			if err != nil {
+				return fmt.Errorf("failed to get module URL: %w", err)
+			}
+
+			res, err := http.Get(modURL) // nolint: gosec
+			if err != nil {
+				return fmt.Errorf("failed to get module: %w", err)
+			}
+
+			// TODO(vito): inspect response, would be nice to surface errors here
+			cmd.Printf("published to %s", modURL)
+
+			return res.Body.Close()
+		})
+	},
+}
+
+func originToPath(origin string) (string, error) {
+	url, err := gitutil.ParseURL(origin)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse git remote origin URL: %w", err)
+	}
+	return strings.TrimSuffix(path.Join(url.Host, url.Path), ".git"), nil
+}
+
 func updateModuleConfig(
 	ctx context.Context,
-	engineClient *client.Client,
-	modFlag *moduleFlagConfig,
+	dag *dagger.Client,
+	moduleDir string,
+	modFlag *modules.Ref,
 	modCfg *modules.Config,
 	cmd *cobra.Command,
 ) (rerr error) {
 	rec := progrock.FromContext(ctx)
-
-	if !modFlag.Local {
-		// nothing to do
-		return nil
-	}
-
-	moduleDir, err := modFlag.LocalSourcePath()
-	if err != nil {
-		// TODO: impossible given Local check, would be nice to make unrepresentable
-		return err
-	}
 
 	configPath := filepath.Join(moduleDir, modules.Filename)
 
@@ -264,8 +366,6 @@ func updateModuleConfig(
 		return fmt.Errorf("failed to write module config: %w", err)
 	}
 
-	dag := engineClient.Dagger()
-
 	mod, err := modFlag.AsModule(ctx, dag)
 	if err != nil {
 		return fmt.Errorf("failed to load module: %w", err)
@@ -291,7 +391,7 @@ func updateModuleConfig(
 	return nil
 }
 
-func getModuleFlagConfig(ctx context.Context, dag *dagger.Client) (*moduleFlagConfig, bool, error) {
+func getModuleRef(ctx context.Context, dag *dagger.Client) (*modules.Ref, bool, error) {
 	wasSet := false
 
 	moduleURL := moduleURL
@@ -309,57 +409,8 @@ func getModuleFlagConfig(ctx context.Context, dag *dagger.Client) (*moduleFlagCo
 	} else {
 		wasSet = true
 	}
-	cfg, err := getModuleFlagConfigFromURL(ctx, dag, moduleURL)
+	cfg, err := modules.ResolveMovingRef(ctx, dag, moduleURL)
 	return cfg, wasSet, err
-}
-
-func getModuleFlagConfigFromURL(ctx context.Context, dag *dagger.Client, moduleURL string) (*moduleFlagConfig, error) {
-	modRef, err := modules.ResolveMovingRef(ctx, dag, moduleURL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse module URL: %w", err)
-	}
-	return &moduleFlagConfig{modRef}, nil
-}
-
-// moduleFlagConfig holds the module settings provided by the user via flags (or defaults if not set)
-type moduleFlagConfig struct {
-	*modules.Ref
-}
-
-func (p moduleFlagConfig) load(ctx context.Context, c *dagger.Client) (*dagger.Module, error) {
-	mod, err := p.AsModule(ctx, c)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load module: %w", err)
-	}
-
-	// NB(vito): do NOT Serve the dependency; that installs it to the 'global'
-	// schema view! we only want dependencies served directly to the dependent
-	// module.
-
-	return mod, nil
-}
-
-func (p moduleFlagConfig) modExists(ctx context.Context, c *dagger.Client) (bool, error) {
-	switch {
-	case p.Local:
-		configPath := modules.NormalizeConfigPath(p.Path)
-		_, err := os.Stat(configPath)
-		if err == nil {
-			return true, nil
-		}
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, fmt.Errorf("failed to stat module config: %w", err)
-	case p.Git != nil:
-		configPath := modules.NormalizeConfigPath(p.SubPath)
-		_, err := c.Git(p.Git.CloneURL).Commit(p.Version).Tree().File(configPath).Sync(ctx)
-		// TODO: this could technically fail for other reasons, but is okay enough for now, it will
-		// still fail later if something else went wrong
-		return err == nil, nil
-	default:
-		return false, fmt.Errorf("invalid module")
-	}
 }
 
 func loadModCmdWrapper(
@@ -387,44 +438,267 @@ func loadModCmdWrapper(
 }
 
 func loadMod(ctx context.Context, c *dagger.Client) (*dagger.Module, error) {
-	mod, modRequired, err := getModuleFlagConfig(ctx, c)
+	mod, modRequired, err := getModuleRef(ctx, c)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get module config: %w", err)
 	}
 
-	modExists, err := mod.modExists(ctx, c)
-	if err != nil {
-		return nil, fmt.Errorf("failed to check if module exists: %w", err)
-	}
-	if !modExists && !modRequired {
-		// only allow failing to load the mod when it was explicitly requested
-		// by the user
-		return nil, nil
+	// check that the module exists first
+	if _, err := mod.Config(ctx, c); err != nil {
+		if !modRequired {
+			// only allow failing to load the mod when it was explicitly requested
+			// by the user
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to load module config: %w", err)
 	}
 
-	loadedMod, err := mod.load(ctx, c)
+	loadedMod, err := mod.AsModule(ctx, c)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load module: %w", err)
 	}
 
-	// TODO: hack to unlazy mod so it's actually loaded
-	// TODO: is this still needed?
-	// TODO(vito): this came up again, specifically because I wanted the
-	// dependencies to be started and served before doing schema introspection
-	// for codegen. still seems useful, OR we could somehow have schema
-	// introspection block/synchronize on loading dependencies automatically
-	// _, err = loadedMod.ID(ctx)
-	// if err != nil {
-	// 	return nil, fmt.Errorf("failed to get loaded module ID: %w", err)
-	// }
-
-	// TODO(vito): immediate follow-up: turns out what I want is to Serve here
-	// but _not_ Serve for each dependency, since we don't want them all
-	// installed into the same schema - transitive deps should not be included.
 	_, err = loadedMod.Serve(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get loaded module ID: %w", err)
 	}
 
 	return loadedMod, nil
+}
+
+// loadModObjects loads the objects defined by the given module in an easier to use data structure.
+func loadModObjects(ctx context.Context, dag *dagger.Client, mod *dagger.Module) (*moduleDef, error) {
+	var res struct {
+		Module *moduleDef
+	}
+
+	err := dag.Do(ctx, &dagger.Request{
+		Query: `
+            query Objects($module: ModuleID!) {
+                module: loadModuleFromID(id: $module) {
+                    name
+                    objects {
+                        asObject {
+                            name
+                            functions {
+                                name
+                                description
+                                returnType {
+                                    kind
+                                    asObject {
+                                        name
+                                    }
+                                    asList {
+                                        elementTypeDef {
+                                            kind
+                                            asObject {
+                                                name
+                                            }
+                                        }
+                                    }
+                                }
+                                args {
+                                    name
+                                    description
+                                    defaultValue
+                                    typeDef {
+                                        kind
+                                        optional
+                                        asObject {
+                                            name
+                                        }
+                                        asList {
+                                            elementTypeDef {
+                                                kind
+                                                asObject {
+                                                    name
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            fields {
+                                name
+                                description
+                                typeDef {
+                                    kind
+                                    optional
+                                    asObject {
+                                        name
+                                    }
+                                    asList {
+                                        elementTypeDef {
+                                            kind
+                                            asObject {
+                                                name
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        `,
+		Variables: map[string]interface{}{
+			"module": mod,
+		},
+	}, &dagger.Response{
+		Data: &res,
+	})
+
+	if err != nil {
+		err = fmt.Errorf("query module objects: %w", err)
+	}
+
+	return res.Module, err
+}
+
+// moduleDef is a representation of dagger.Module.
+type moduleDef struct {
+	Name    string
+	Objects []*modTypeDef
+}
+
+// AsObjects returns the module's object type definitions.
+func (m *moduleDef) AsObjects() []*modObject {
+	var defs []*modObject
+	for _, typeDef := range m.Objects {
+		if typeDef.AsObject != nil {
+			defs = append(defs, typeDef.AsObject)
+		}
+	}
+	return defs
+}
+
+// GetObject retrieves a saved object type definition from the module.
+func (m *moduleDef) GetObject(name string) *modObject {
+	for _, obj := range m.AsObjects() {
+		// Normalize name in case an SDK uses a different convention for object names.
+		if gqlObjectName(obj.Name) == gqlObjectName(name) {
+			return obj
+		}
+	}
+	return nil
+}
+
+func (m *moduleDef) GetMainObject() *modObject {
+	return m.GetObject(m.Name)
+}
+
+// LoadObject attempts to replace a function's return object type or argument's
+// object type with with one from the module's object type definitions, to
+// recover missing function definitions in those places when chaining functions.
+func (m *moduleDef) LoadObject(typeDef *modTypeDef) {
+	if typeDef.AsObject != nil && typeDef.AsObject.Functions == nil && typeDef.AsObject.Fields == nil {
+		obj := m.GetObject(typeDef.AsObject.Name)
+		if obj != nil {
+			typeDef.AsObject = obj
+		}
+	}
+	if typeDef.AsList != nil {
+		m.LoadObject(typeDef.AsList.ElementTypeDef)
+	}
+}
+
+// modTypeDef is a representation of dagger.TypeDef.
+type modTypeDef struct {
+	Kind     dagger.TypeDefKind
+	Optional bool
+	AsObject *modObject
+	AsList   *modList
+}
+
+func (t *modTypeDef) ObjectName() string {
+	if t.AsObject != nil {
+		return t.AsObject.Name
+	}
+	return ""
+}
+
+// modObject is a representation of dagger.ObjectTypeDef.
+type modObject struct {
+	Name      string
+	Functions []*modFunction
+	Fields    []*modField
+}
+
+// GetFunctions returns the object's function definitions as well as the fields,
+// which are treated as functions with no arguments.
+func (o *modObject) GetFunctions() []*modFunction {
+	fns := make([]*modFunction, 0, len(o.Functions)+len(o.Fields))
+	for _, f := range o.Fields {
+		fns = append(fns, &modFunction{
+			Name:        f.Name,
+			Description: f.Description,
+			ReturnType:  f.TypeDef,
+		})
+	}
+	fns = append(fns, o.Functions...)
+	return fns
+}
+
+// modList is a representation of dagger.ListTypeDef.
+type modList struct {
+	ElementTypeDef *modTypeDef
+}
+
+// modField is a representation of dagger.FieldTypeDef.
+type modField struct {
+	Name        string
+	Description string
+	TypeDef     *modTypeDef
+}
+
+// modFunction is a representation of dagger.Function.
+type modFunction struct {
+	Name        string
+	Description string
+	ReturnType  *modTypeDef
+	Args        []*modFunctionArg
+}
+
+// modFunctionArg is a representation of dagger.FunctionArg.
+type modFunctionArg struct {
+	Name         string
+	Description  string
+	TypeDef      *modTypeDef
+	DefaultValue dagger.JSON
+	flagName     string
+}
+
+// FlagName returns the name of the argument using CLI naming conventions.
+func (r *modFunctionArg) FlagName() string {
+	if r.flagName == "" {
+		r.flagName = cliName(r.Name)
+	}
+	return r.flagName
+}
+
+func getDefaultValue[T any](r *modFunctionArg) (T, error) {
+	var val T
+	err := json.Unmarshal([]byte(r.DefaultValue), &val)
+	return val, err
+}
+
+// gqlObjectName converts casing to a GraphQL object  name
+func gqlObjectName(name string) string {
+	return strcase.ToCamel(name)
+}
+
+// gqlFieldName converts casing to a GraphQL object field name
+func gqlFieldName(name string) string {
+	return strcase.ToLowerCamel(name)
+}
+
+// gqlArgName converts casing to a GraphQL field argument name
+func gqlArgName(name string) string {
+	return strcase.ToLowerCamel(name)
+}
+
+// cliName converts casing to the CLI convention (kebab)
+func cliName(name string) string {
+	return strcase.ToKebab(name)
 }

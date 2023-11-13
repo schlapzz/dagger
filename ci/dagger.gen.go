@@ -1020,6 +1020,25 @@ func (r *Container) WithFocus() *Container {
 	}
 }
 
+// Sets GPU access parameters for the given container
+func (r *Container) WithGPU(devices []string) *Container {
+	q := r.q.Select("withGPU")
+	q = q.Arg("devices", devices)
+	return &Container{
+		q: q,
+		c: r.c,
+	}
+}
+
+// Sets GPU access parameters for the given container
+func (r *Container) WithAllGPUs() *Container {
+	q := r.q.Select("withAllGPUs")
+	return &Container{
+		q: q,
+		c: r.c,
+	}
+}
+
 // Retrieves this container plus the given label.
 func (r *Container) WithLabel(name string, value string) *Container {
 	q := r.q.Select("withLabel")
@@ -1568,6 +1587,8 @@ func (r *Directory) DockerBuild(opts ...DirectoryDockerBuildOpts) *Container {
 type DirectoryEntriesOpts struct {
 	// Location of the directory to look at (e.g., "/src").
 	Path string
+	// Pattern to include in the entries (e.g., "*.md").
+	Include string
 }
 
 // Returns a list of files and directories at the given path.
@@ -1577,6 +1598,10 @@ func (r *Directory) Entries(ctx context.Context, opts ...DirectoryEntriesOpts) (
 		// `path` optional argument
 		if !querybuilder.IsZeroValue(opts[i].Path) {
 			q = q.Arg("path", opts[i].Path)
+		}
+		// `include` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Include) {
+			q = q.Arg("include", opts[i].Include)
 		}
 	}
 

@@ -22,6 +22,8 @@ import (
 
 var publishedEngineArches = []string{"amd64", "arm64"}
 
+var publishedGPUEngineArches = []string{"amd64"}
+
 func parseRef(tag string) error {
 	if tag == "main" {
 		return nil
@@ -61,7 +63,7 @@ func (t Engine) Lint(ctx context.Context) error {
 	repo := util.RepositoryGoCodeOnly(c)
 
 	_, err = c.Container().
-		From("golangci/golangci-lint:v1.51-alpine").
+		From("golangci/golangci-lint:v1.55-alpine").
 		WithMountedDirectory("/app", repo).
 		WithWorkdir("/app").
 		WithExec([]string{"golangci-lint", "run", "-v", "--timeout", "5m"}).
@@ -84,13 +86,21 @@ func (t Engine) Publish(ctx context.Context, version string) error {
 	c = c.Pipeline("engine").Pipeline("publish")
 
 	var (
+		registry    = util.GetHostEnv("DAGGER_ENGINE_IMAGE_REGISTRY")
+		username    = util.GetHostEnv("DAGGER_ENGINE_IMAGE_USERNAME")
+		password    = c.SetSecret("DAGGER_ENGINE_IMAGE_PASSWORD", util.GetHostEnv("DAGGER_ENGINE_IMAGE_PASSWORD"))
 		engineImage = util.GetHostEnv("DAGGER_ENGINE_IMAGE")
 		ref         = fmt.Sprintf("%s:%s", engineImage, version)
+		gpuRef      = fmt.Sprintf("%s:%s-gpu", engineImage, version)
 	)
 
-	digest, err := c.Container().Publish(ctx, ref, dagger.ContainerPublishOpts{
-		PlatformVariants: util.DevEngineContainer(c, publishedEngineArches, version),
-	})
+	digest, err := c.Container().
+		WithRegistryAuth(registry, username, password).
+		Publish(ctx, ref, dagger.ContainerPublishOpts{
+			PlatformVariants: util.DevEngineContainer(c, publishedEngineArches, version),
+			// use gzip to avoid incompatibility w/ older docker versions
+			ForcedCompression: dagger.Gzip,
+		})
 	if err != nil {
 		return err
 	}
@@ -107,6 +117,16 @@ func (t Engine) Publish(ctx context.Context, version string) error {
 	time.Sleep(3 * time.Second) // allow buildkit logs to flush, to minimize potential confusion with interleaving
 	fmt.Println("PUBLISHED IMAGE REF:", digest)
 
+	// gpu is experimental, not fatal if publish fails
+	gpuDigest, err := c.Container().Publish(ctx, gpuRef, dagger.ContainerPublishOpts{
+		PlatformVariants: util.DevEngineContainerWithGPUSupport(c, publishedGPUEngineArches, version),
+	})
+	if err == nil {
+		fmt.Println("PUBLISHED GPU IMAGE REF:", gpuDigest)
+	} else {
+		fmt.Println("GPU IMAGE PUBLISH FAILED: ", err.Error())
+	}
+
 	return nil
 }
 
@@ -120,19 +140,32 @@ func (t Engine) TestPublish(ctx context.Context) error {
 	defer c.Close()
 
 	c = c.Pipeline("engine").Pipeline("test-publish")
+
 	_, err = c.Container().Export(ctx, "./engine.tar", dagger.ContainerExportOpts{
 		PlatformVariants: util.DevEngineContainer(c, publishedEngineArches, ""),
 	})
+	if err != nil {
+		return err
+	}
+
+	_, err = c.Container().Export(ctx, "./engine-gpu.tar", dagger.ContainerExportOpts{
+		PlatformVariants: util.DevEngineContainerWithGPUSupport(c, publishedGPUEngineArches, ""),
+	})
+	if err != nil {
+		return err
+	}
+
 	return err
 }
 
-func registry(c *dagger.Client) *dagger.Container {
+func registry(c *dagger.Client) *dagger.Service {
 	return c.Pipeline("registry").Container().From("registry:2").
 		WithExposedPort(5000, dagger.ContainerWithExposedPortOpts{Protocol: dagger.Tcp}).
-		WithExec(nil)
+		WithExec(nil).
+		AsService()
 }
 
-func privateRegistry(c *dagger.Client) *dagger.Container {
+func privateRegistry(c *dagger.Client) *dagger.Service {
 	const htpasswd = "john:$2y$05$/iP8ud0Fs8o3NLlElyfVVOp6LesJl3oRLYoc3neArZKWX10OhynSC" //nolint:gosec
 	return c.Pipeline("private registry").Container().From("registry:2").
 		WithNewFile("/auth/htpasswd", dagger.ContainerWithNewFileOpts{Contents: htpasswd}).
@@ -140,17 +173,24 @@ func privateRegistry(c *dagger.Client) *dagger.Container {
 		WithEnvVariable("REGISTRY_AUTH_HTPASSWD_REALM", "Registry Realm").
 		WithEnvVariable("REGISTRY_AUTH_HTPASSWD_PATH", "/auth/htpasswd").
 		WithExposedPort(5000, dagger.ContainerWithExposedPortOpts{Protocol: dagger.Tcp}).
-		WithExec(nil)
+		WithExec(nil).
+		AsService()
 }
 
 // Test runs Engine tests
 func (t Engine) Test(ctx context.Context) error {
-	return t.test(ctx, false)
+	return t.test(ctx, false, "")
 }
 
 // TestRace runs Engine tests with go race detector enabled
 func (t Engine) TestRace(ctx context.Context) error {
-	return t.test(ctx, true)
+	return t.test(ctx, true, "")
+}
+
+// TestImportant runs Engine Container+Module tests, which give good basic coverage
+// of functionality w/out having to run everything
+func (t Engine) TestImportant(ctx context.Context) error {
+	return t.test(ctx, true, `^(TestModule|TestContainer)`)
 }
 
 // TestRace runs Engine tests with go race detector enabled
@@ -189,12 +229,27 @@ func (t Engine) Dev(ctx context.Context) error {
 
 	c = c.Pipeline("engine").Pipeline("dev")
 
+	var gpuSupportEnabled bool
+	if v := os.Getenv(util.GPUSupportEnvName); v != "" {
+		gpuSupportEnabled = true
+	}
+
 	arches := []string{runtime.GOARCH}
 
 	tarPath := "./bin/engine.tar"
 
+	// Conditionally load GPU enabled image for dev environment if the flag is set:
+	var platformVariants []*dagger.Container
+	if gpuSupportEnabled {
+		platformVariants = util.DevEngineContainerWithGPUSupport(c, arches, "")
+	} else {
+		platformVariants = util.DevEngineContainer(c, arches, "")
+	}
+
 	_, err = c.Container().Export(ctx, tarPath, dagger.ContainerExportOpts{
-		PlatformVariants: util.DevEngineContainer(c, arches, ""),
+		PlatformVariants: platformVariants,
+		// use gzip to avoid incompatibility w/ older docker versions
+		ForcedCompression: dagger.Gzip,
 	})
 	if err != nil {
 		return err
@@ -234,14 +289,22 @@ func (t Engine) Dev(ctx context.Context) error {
 	runArgs := []string{
 		"run",
 		"-d",
-		// "--rm",
+	}
+
+	// Make all GPUs visible to the engine container if the GPU support flag is set:
+	if gpuSupportEnabled {
+		runArgs = append(runArgs, []string{"--gpus", "all"}...)
+	}
+	runArgs = append(runArgs, []string{
 		"-e", util.CacheConfigEnvName,
 		"-e", "_EXPERIMENTAL_DAGGER_CLOUD_TOKEN",
 		"-e", "_EXPERIMENTAL_DAGGER_CLOUD_URL",
+		"-e", util.GPUSupportEnvName,
 		"-v", volumeName + ":" + util.EngineDefaultStateDir,
 		"--name", util.EngineContainerName,
 		"--privileged",
-	}
+	}...)
+
 	runArgs = append(runArgs, imageName, "--debug")
 
 	if output, err := exec.CommandContext(ctx, "docker", runArgs...).CombinedOutput(); err != nil {
@@ -261,7 +324,7 @@ func (t Engine) Dev(ctx context.Context) error {
 	return nil
 }
 
-func (t Engine) test(ctx context.Context, race bool) error {
+func (t Engine) test(ctx context.Context, race bool, testRegex string) error {
 	c, err := dagger.Connect(ctx, dagger.WithLogOutput(os.Stderr))
 	if err != nil {
 		return err
@@ -284,6 +347,10 @@ func (t Engine) test(ctx context.Context, race bool) error {
 	if race {
 		args = append(args, "-race", "-timeout=1h")
 		cgoEnabledEnv = "1"
+	}
+
+	if testRegex != "" {
+		args = append(args, "-run", testRegex)
 	}
 
 	args = append(args, "./...")
@@ -342,16 +409,17 @@ func (t Engine) testCmd(ctx context.Context, c *dagger.Client) (*dagger.Containe
 	})
 
 	registrySvc := registry(c)
-	devEngine = devEngine.
+	devEngineSvc := devEngine.
 		WithServiceBinding("registry", registrySvc).
 		WithServiceBinding("privateregistry", privateRegistry(c)).
 		WithExposedPort(1234, dagger.ContainerWithExposedPortOpts{Protocol: dagger.Tcp}).
 		WithMountedCache("/var/lib/dagger", c.CacheVolume("dagger-dev-engine-test-state"+identity.NewID())).
 		WithExec(nil, dagger.ContainerWithExecOpts{
 			InsecureRootCapabilities: true,
-		})
+		}).
+		AsService()
 
-	endpoint, err := devEngine.Endpoint(ctx, dagger.ContainerEndpointOpts{Port: 1234, Scheme: "tcp"})
+	endpoint, err := devEngineSvc.Endpoint(ctx, dagger.ServiceEndpointOpts{Port: 1234, Scheme: "tcp"})
 	if err != nil {
 		cleanup()
 		return nil, nil, err
@@ -366,7 +434,7 @@ func (t Engine) testCmd(ctx context.Context, c *dagger.Client) (*dagger.Containe
 		WithMountedDirectory(utilDirPath, testEngineUtils).
 		WithEnvVariable("_DAGGER_TESTS_ENGINE_TAR", filepath.Join(utilDirPath, "engine.tar")).
 		WithWorkdir("/app").
-		WithServiceBinding("dagger-engine", devEngine).
+		WithServiceBinding("dagger-engine", devEngineSvc).
 		WithServiceBinding("registry", registrySvc)
 
 	// TODO use Container.With() to set this. It'll be much nicer.
