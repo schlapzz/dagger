@@ -109,6 +109,15 @@ func (typeDef *TypeDef) Digest() (digest.Digest, error) {
 	return stableDigest(typeDef)
 }
 
+func (typeDef *TypeDef) Underlying() *TypeDef {
+	switch typeDef.Kind {
+	case TypeDefKindList:
+		return typeDef.AsList.ElementTypeDef.Underlying()
+	default:
+		return typeDef
+	}
+}
+
 func (typeDef TypeDef) Clone() *TypeDef {
 	cp := typeDef
 	if typeDef.AsList != nil {
@@ -152,9 +161,10 @@ func (typeDef *TypeDef) WithObjectField(name string, fieldType *TypeDef, desc st
 	}
 	typeDef = typeDef.Clone()
 	typeDef.AsObject.Fields = append(typeDef.AsObject.Fields, &FieldTypeDef{
-		Name:        name,
-		Description: desc,
-		TypeDef:     fieldType,
+		Name:         strcase.ToLowerCamel(name),
+		OriginalName: name,
+		Description:  desc,
+		TypeDef:      fieldType,
 	})
 	return typeDef, nil
 }
@@ -170,12 +180,25 @@ func (typeDef *TypeDef) WithObjectFunction(fn *Function) (*TypeDef, error) {
 	return typeDef, nil
 }
 
+func (typeDef *TypeDef) WithObjectConstructor(fn *Function) (*TypeDef, error) {
+	if typeDef.AsObject == nil {
+		return nil, fmt.Errorf("cannot add constructor function to non-object type: %s", typeDef.Kind)
+	}
+
+	typeDef = typeDef.Clone()
+	fn = fn.Clone()
+	fn.ParentOriginalName = typeDef.AsObject.OriginalName
+	typeDef.AsObject.Constructor = fn
+	return typeDef, nil
+}
+
 type ObjectTypeDef struct {
 	// Name is the standardized name of the object (CamelCase), as used for the object in the graphql schema
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	Fields      []*FieldTypeDef `json:"fields"`
 	Functions   []*Function     `json:"functions"`
+	Constructor *Function       `json:"constructor"`
 
 	// Below are not in public API
 
@@ -204,6 +227,10 @@ func (typeDef ObjectTypeDef) Clone() *ObjectTypeDef {
 		cp.Functions[i] = fn.Clone()
 	}
 
+	if cp.Constructor != nil {
+		cp.Constructor = typeDef.Constructor.Clone()
+	}
+
 	return &cp
 }
 
@@ -229,6 +256,12 @@ type FieldTypeDef struct {
 	Name        string   `json:"name"`
 	Description string   `json:"description"`
 	TypeDef     *TypeDef `json:"typeDef"`
+
+	// Below are not in public API
+
+	// The original name of the object as provided by the SDK that defined it, used
+	// when invoking the SDK so it doesn't need to think as hard about case conversions
+	OriginalName string `json:"originalName,omitempty"`
 }
 
 func (typeDef FieldTypeDef) Clone() *FieldTypeDef {

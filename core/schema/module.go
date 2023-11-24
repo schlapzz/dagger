@@ -13,6 +13,7 @@ import (
 
 	"github.com/dagger/dagger/core"
 	"github.com/dagger/dagger/core/modules"
+	"github.com/dagger/dagger/core/resourceid"
 	"github.com/dagger/dagger/engine"
 	"github.com/dagger/dagger/engine/buildkit"
 	"github.com/dagger/graphql"
@@ -37,12 +38,12 @@ func (s *moduleSchema) Name() string {
 	return "module"
 }
 
-func (s *moduleSchema) Schema() string {
-	return strings.Join([]string{Module, Function, InternalSDK}, "\n")
+func (s *moduleSchema) SourceModuleName() string {
+	return coreModuleName
 }
 
-func (s *moduleSchema) Dependencies() []ExecutableSchema {
-	return nil
+func (s *moduleSchema) Schema() string {
+	return strings.Join([]string{Module, TypeDef, InternalSDK}, "\n")
 }
 
 func (s *moduleSchema) Resolvers() Resolvers {
@@ -81,13 +82,14 @@ func (s *moduleSchema) Resolvers() Resolvers {
 	ResolveIDable[core.FunctionArg](rs, "FunctionArg", ObjectResolver{})
 
 	ResolveIDable[core.TypeDef](rs, "TypeDef", ObjectResolver{
-		"kind":         ToResolver(s.typeDefKind),
-		"withOptional": ToResolver(s.typeDefWithOptional),
-		"withKind":     ToResolver(s.typeDefWithKind),
-		"withListOf":   ToResolver(s.typeDefWithListOf),
-		"withObject":   ToResolver(s.typeDefWithObject),
-		"withField":    ToResolver(s.typeDefWithObjectField),
-		"withFunction": ToResolver(s.typeDefWithObjectFunction),
+		"kind":            ToResolver(s.typeDefKind),
+		"withOptional":    ToResolver(s.typeDefWithOptional),
+		"withKind":        ToResolver(s.typeDefWithKind),
+		"withListOf":      ToResolver(s.typeDefWithListOf),
+		"withObject":      ToResolver(s.typeDefWithObject),
+		"withField":       ToResolver(s.typeDefWithObjectField),
+		"withFunction":    ToResolver(s.typeDefWithObjectFunction),
+		"withConstructor": ToResolver(s.typeDefWithObjectConstructor),
 	})
 
 	ResolveIDable[core.GeneratedCode](rs, "GeneratedCode", ObjectResolver{
@@ -159,6 +161,20 @@ func (s *moduleSchema) typeDefWithObjectFunction(ctx context.Context, def *core.
 		return nil, fmt.Errorf("failed to decode element type: %w", err)
 	}
 	return def.WithObjectFunction(fn)
+}
+
+func (s *moduleSchema) typeDefWithObjectConstructor(ctx context.Context, def *core.TypeDef, args struct {
+	Function core.FunctionID
+}) (*core.TypeDef, error) {
+	fn, err := args.Function.Decode()
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode element type: %w", err)
+	}
+	// Constructors are invoked by setting the ObjectName to the name of the object its constructing and the
+	// FunctionName to "", so ignore the name of the function.
+	fn.Name = ""
+	fn.OriginalName = ""
+	return def.WithObjectConstructor(fn)
 }
 
 func (s *moduleSchema) typeDefKind(ctx context.Context, def *core.TypeDef, args any) (string, error) {
@@ -523,14 +539,18 @@ func (s *moduleSchema) linkDependencyBlobs(ctx context.Context, cacheResult *bui
 		}
 		return nil
 	case core.TypeDefKindObject:
-		_, isIDable := s.idableObjectResolver(typeDef.AsObject.Name, schemaView)
-		if !isIDable {
-			// This object is not IDable but we still need to check its Fields for any objects that may contain
-			// IDable objects
-			mapValue, ok := value.(map[string]any)
-			if !ok {
-				return fmt.Errorf("expected object value for %s, got %T", typeDef.AsObject.Name, value)
+		fromID := s.createIDResolver(typeDef, schemaView)
+		if fromID != nil {
+			var err error
+			value, err = fromID(value)
+			if err != nil {
+				return err
 			}
+		}
+
+		if mapValue, ok := value.(map[string]any); ok {
+			// This object is not a core type but we still need to check its
+			// Fields for any objects that may contain core objects
 			for fieldName, fieldValue := range mapValue {
 				field, ok := typeDef.AsObject.FieldByName(fieldName)
 				if !ok {
@@ -543,45 +563,33 @@ func (s *moduleSchema) linkDependencyBlobs(ctx context.Context, cacheResult *bui
 			return nil
 		}
 
-		// This is an IDable core type, check to see if it has any blobs:// we need to link with.
-		idStr, ok := value.(string)
-		if !ok {
-			return fmt.Errorf("expected string value for id result, got %T", value)
-		}
+		if pbDefinitioner, ok := value.(core.HasPBDefinitions); ok {
+			pbDefs, err := pbDefinitioner.PBDefinitions()
+			if err != nil {
+				return fmt.Errorf("failed to get pb definitions: %w", err)
+			}
+			dependencyBlobs := map[digest.Digest]*ocispecs.Descriptor{}
+			for _, pbDef := range pbDefs {
+				dag, err := buildkit.DefToDAG(pbDef)
+				if err != nil {
+					return fmt.Errorf("failed to convert pb definition to dag: %w", err)
+				}
+				blobs, err := dag.BlobDependencies()
+				if err != nil {
+					return fmt.Errorf("failed to get blob dependencies: %w", err)
+				}
+				for k, v := range blobs {
+					dependencyBlobs[k] = v
+				}
+			}
 
-		resource, err := core.ResourceFromID(idStr)
-		if err != nil {
-			return fmt.Errorf("failed to get resource from ID: %w", err)
-		}
-
-		pbDefinitioner, ok := resource.(core.HasPBDefinitions)
-		if !ok {
-			// no dependency blobs to handle
+			if err := cacheResult.Ref.AddDependencyBlobs(ctx, dependencyBlobs); err != nil {
+				return fmt.Errorf("failed to add dependency blob: %w", err)
+			}
 			return nil
 		}
 
-		pbDefs, err := pbDefinitioner.PBDefinitions()
-		if err != nil {
-			return fmt.Errorf("failed to get pb definitions: %w", err)
-		}
-		dependencyBlobs := map[digest.Digest]*ocispecs.Descriptor{}
-		for _, pbDef := range pbDefs {
-			dag, err := buildkit.DefToDAG(pbDef)
-			if err != nil {
-				return fmt.Errorf("failed to convert pb definition to dag: %w", err)
-			}
-			blobs, err := dag.BlobDependencies()
-			if err != nil {
-				return fmt.Errorf("failed to get blob dependencies: %w", err)
-			}
-			for k, v := range blobs {
-				dependencyBlobs[k] = v
-			}
-		}
-
-		if err := cacheResult.Ref.AddDependencyBlobs(ctx, dependencyBlobs); err != nil {
-			return fmt.Errorf("failed to add dependency blob: %w", err)
-		}
+		// no dependency blobs to handle
 		return nil
 	default:
 		return fmt.Errorf("unhandled type def kind %q", typeDef.Kind)
@@ -612,11 +620,11 @@ func (s *moduleSchema) serveModuleToView(ctx context.Context, mod *core.Module, 
 
 	// TODO: it makes no sense to use this cache since we don't need a core.Module, but also doesn't hurt, but make a separate one anyways for clarity
 	_, err = s.moduleCache.GetOrInitialize(cacheKey, func() (*core.Module, error) {
-		executableSchema, err := s.moduleToSchemaFor(ctx, mod, schemaView)
+		typeSchema, err := s.moduleToSchema(ctx, mod)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert module to executable schema: %w", err)
 		}
-		if err := schemaView.addSchemas(executableSchema); err != nil {
+		if err := schemaView.addSchemas(typeSchema); err != nil {
 			return nil, fmt.Errorf("failed to install module schema: %w", err)
 		}
 		return mod, nil
@@ -749,20 +757,23 @@ func (s *moduleSchema) installDepsToSchemaView(
 	return eg.Wait()
 }
 
-/* TODO: for module->schema conversion
-* Need to handle IDable type as input argument (schema should accept ID as input type)
-* Need to handle corner case where a single object is used as both input+output (append "Input" to name?)
-* Handle case where scalar from core is returned? Might need API updates unless we hack it and say they are all strings for now...
-* If an object from another non-core Module makes its way into this Module's schema, need to include the relevant schema+resolvers for that too.
- */
+// moduleToSchema converts a Module to an ExecutableSchema that can be stitched
+// in to an existing schema. It presumes that the Module's Functions have
+// already been loaded.
+func (s *moduleSchema) moduleToSchema(ctx context.Context, module *core.Module) (ExecutableSchema, error) {
+	schemaView, err := s.getModuleSchemaView(module)
+	if err != nil {
+		return nil, err
+	}
 
-// moduleToSchema converts a Module to an ExecutableSchema that can be stitched in to an existing schema.
-// It presumes that the Module's Functions have already been loaded.
-func (s *moduleSchema) moduleToSchemaFor(ctx context.Context, module *core.Module, dest *schemaView) (ExecutableSchema, error) {
-	schemaDoc := &ast.SchemaDocument{}
-	newResolvers := Resolvers{}
+	typeSchemaDoc := &ast.SchemaDocument{}
+	queryResolver := ObjectResolver{}
+	typeSchemaResolvers := Resolvers{
+		"Query": queryResolver,
+	}
 
 	for _, def := range module.Objects {
+		def := def
 		objTypeDef := def.AsObject
 		objName := gqlObjectName(objTypeDef.Name)
 
@@ -773,7 +784,7 @@ func (s *moduleSchema) moduleToSchemaFor(ctx context.Context, module *core.Modul
 		}
 
 		// check whether this is a pre-existing object (from core or another module)
-		_, preExistingObject := dest.resolvers()[objName]
+		_, preExistingObject := schemaView.resolvers()[objName]
 		if preExistingObject {
 			// modules can reference types from core/other modules as types, but they
 			// can't attach any new fields or functions to them
@@ -788,87 +799,153 @@ func (s *moduleSchema) moduleToSchemaFor(ctx context.Context, module *core.Modul
 			Description: formatGqlDescription(objTypeDef.Description),
 			Kind:        ast.Object,
 		}
+		astIDDef := &ast.Definition{
+			Name:        objName + "ID",
+			Description: formatGqlDescription("A reference to %s", objName),
+			Kind:        ast.Scalar,
+		}
+		astLoadDef := &ast.FieldDefinition{
+			Name:        fmt.Sprintf("load%sFromID", objName),
+			Description: formatGqlDescription("Loads a %s from an ID", objName),
+			Arguments: ast.ArgumentDefinitionList{
+				&ast.ArgumentDefinition{
+					Name: "id",
+					Type: ast.NonNullNamedType(objName+"ID", nil),
+				},
+			},
+			Type: ast.NonNullNamedType(objName, nil),
+		}
 
 		newObjResolver := ObjectResolver{}
+
+		astDef.Fields = append(astDef.Fields, &ast.FieldDefinition{
+			Name:        "id",
+			Description: formatGqlDescription("A unique identifier for a %s", objName),
+			Type:        ast.NonNullNamedType(objName+"ID", nil),
+		})
+		newObjResolver["id"] = func(p graphql.ResolveParams) (any, error) {
+			return resourceid.EncodeModule(objName, p.Source)
+		}
+
 		for _, field := range objTypeDef.Fields {
+			field := field
+
 			fieldASTType, err := s.typeDefToSchema(field.TypeDef, false)
 			if err != nil {
 				return nil, err
 			}
-			fieldName := gqlFieldName(field.Name)
+
+			// Check if this is a type from another (non-core) module, which is currently
+			// not allowed
+			sourceModuleName, ok := schemaView.sourceModuleName(fieldASTType)
+			if ok && sourceModuleName != coreModuleName {
+				return nil, fmt.Errorf("object %q field %q cannot reference external type from dependency module %q",
+					objTypeDef.OriginalName,
+					field.OriginalName,
+					sourceModuleName,
+				)
+			}
+
 			astDef.Fields = append(astDef.Fields, &ast.FieldDefinition{
-				Name:        fieldName,
+				Name:        field.Name,
 				Description: formatGqlDescription(field.Description),
 				Type:        fieldASTType,
 			})
 
-			// if this is an IDable type, add a resolver that converts the ID into
-			// the real object, otherwise its schema will be called against the
-			// string
-			if field.TypeDef.Kind == core.TypeDefKindObject {
-				newObjResolver[fieldName] = func(p graphql.ResolveParams) (any, error) {
-					res, err := graphql.DefaultResolveFn(p)
-					if err != nil {
-						return nil, err
-					}
-					id, ok := res.(string)
-					if !ok {
-						return nil, fmt.Errorf("expected string %sID, got %T", field.TypeDef.AsObject.Name, res)
-					}
-					return core.ResourceFromID(id)
+			fromID := s.createIDResolver(field.TypeDef, schemaView)
+			newObjResolver[field.Name] = func(p graphql.ResolveParams) (any, error) {
+				p.Info.FieldName = field.OriginalName
+				res, err := graphql.DefaultResolveFn(p)
+				if err != nil {
+					return nil, err
 				}
-			} else {
-				// no resolver to add; fields rely on the graphql "trivial resolver"
-				// where the value is just read from the parent object
-				_ = 1
+				if fromID != nil {
+					return fromID(res)
+				}
+				return res, nil
 			}
 		}
 
 		for _, fn := range objTypeDef.Functions {
-			resolver, err := s.functionResolver(astDef, module, fn, dest)
+			fieldDef, resolver, err := s.functionResolver(objTypeDef, module, fn, schemaView)
 			if err != nil {
 				return nil, err
 			}
+			astDef.Fields = append(astDef.Fields, fieldDef)
 			newObjResolver[gqlFieldName(fn.Name)] = resolver
 		}
+
 		if len(newObjResolver) > 0 {
-			newResolvers[objName] = newObjResolver
-		}
+			typeSchemaResolvers[objName] = newObjResolver
+			typeSchemaResolvers[objName+"ID"] = stringResolver[string]()
 
-		if len(astDef.Fields) > 0 {
-			schemaDoc.Definitions = append(schemaDoc.Definitions, astDef)
-		}
-
-		constructorName := gqlFieldName(def.AsObject.Name)
-
-		if constructorName == gqlFieldName(module.Name) {
-			// stitch in the module object right under Query
-			schemaDoc.Extensions = append(schemaDoc.Extensions, &ast.Definition{
-				Name: "Query",
-				Kind: ast.Object,
-				Fields: ast.FieldList{&ast.FieldDefinition{
-					Name: constructorName,
-					// TODO is it correct to set it here too vs. type definition?
-					// Description: def.AsObject.Description,
-					Type: objType,
-				}},
-			})
-
-			newResolvers["Query"] = ObjectResolver{
-				constructorName: PassthroughResolver,
+			fromID := s.createIDResolver(def, schemaView)
+			queryResolver[fmt.Sprintf("load%sFromID", objName)] = func(p graphql.ResolveParams) (any, error) {
+				return fromID(p.Args["id"])
 			}
+		}
+
+		// handle object constructor
+		var constructorFieldDef *ast.FieldDefinition
+		var constructorResolver graphql.FieldResolveFn
+		isMainModuleObject := objName == gqlObjectName(module.Name)
+		if isMainModuleObject {
+			constructorFieldDef = &ast.FieldDefinition{
+				Name:        gqlFieldName(objName),
+				Description: formatGqlDescription(objTypeDef.Description),
+				Type:        objType,
+			}
+
+			if objTypeDef.Constructor != nil {
+				// use explicit user-defined constructor if provided
+				fn := objTypeDef.Constructor
+				if fn.ReturnType.Kind != core.TypeDefKindObject {
+					return nil, fmt.Errorf("constructor function for object %s must return that object", objTypeDef.OriginalName)
+				}
+				if fn.ReturnType.AsObject.OriginalName != objTypeDef.OriginalName {
+					return nil, fmt.Errorf("constructor function for object %s must return that object", objTypeDef.OriginalName)
+				}
+
+				fieldDef, resolver, err := s.functionResolver(objTypeDef, module, fn, schemaView)
+				if err != nil {
+					return nil, err
+				}
+				constructorFieldDef.Arguments = fieldDef.Arguments
+				constructorResolver = resolver
+			} else {
+				// otherwise default to a simple field with no args that returns an initially empty object
+				constructorResolver = PassthroughResolver
+			}
+
+			typeSchemaDoc.Extensions = append(typeSchemaDoc.Extensions, &ast.Definition{
+				Name:   "Query",
+				Kind:   ast.Object,
+				Fields: ast.FieldList{constructorFieldDef},
+			})
+			queryResolver[constructorFieldDef.Name] = constructorResolver
+		}
+
+		if len(astDef.Fields) > 0 || constructorFieldDef != nil {
+			typeSchemaDoc.Definitions = append(typeSchemaDoc.Definitions, astDef, astIDDef)
+			typeSchemaDoc.Extensions = append(typeSchemaDoc.Extensions, &ast.Definition{
+				Name:   "Query",
+				Kind:   ast.Object,
+				Fields: ast.FieldList{astLoadDef},
+			})
 		}
 	}
 
 	buf := &bytes.Buffer{}
-	formatter.NewFormatter(buf).FormatSchemaDocument(schemaDoc)
-	schemaStr := buf.String()
+	formatter.NewFormatter(buf).FormatSchemaDocument(typeSchemaDoc)
+	typeSchemaStr := buf.String()
 
-	return StaticSchema(StaticSchemaParams{
-		Name:      module.Name,
-		Schema:    schemaStr,
-		Resolvers: newResolvers,
-	}), nil
+	typeSchema := StaticSchema(StaticSchemaParams{
+		Name:             module.Name + ".types",
+		SourceModuleName: module.Name,
+		Schema:           typeSchemaStr,
+		Resolvers:        typeSchemaResolvers,
+	})
+	return typeSchema, nil
 }
 
 /*
@@ -879,8 +956,11 @@ comment
 
 Which avoids corner cases where the comment ends in a `"`.
 */
-func formatGqlDescription(desc string) string {
-	return "\n" + strings.TrimSpace(desc) + "\n"
+func formatGqlDescription(desc string, args ...any) string {
+	if desc == "" {
+		return ""
+	}
+	return "\n" + strings.TrimSpace(fmt.Sprintf(desc, args...)) + "\n"
 }
 
 func (s *moduleSchema) typeDefToSchema(typeDef *core.TypeDef, isInput bool) (*ast.Type, error) {
@@ -934,28 +1014,52 @@ func (s *moduleSchema) typeDefToSchema(typeDef *core.TypeDef, isInput bool) (*as
 }
 
 func (s *moduleSchema) functionResolver(
-	parentObj *ast.Definition,
+	parentTypeDef *core.ObjectTypeDef,
 	module *core.Module,
 	fn *core.Function,
-	dest *schemaView,
-) (graphql.FieldResolveFn, error) {
+	schemaView *schemaView,
+) (*ast.FieldDefinition, graphql.FieldResolveFn, error) {
 	fnName := gqlFieldName(fn.Name)
-	objFnName := fmt.Sprintf("%s.%s", parentObj.Name, fnName)
+	objFnName := fmt.Sprintf("%s.%s", parentTypeDef.Name, fnName)
 
 	returnASTType, err := s.typeDefToSchema(fn.ReturnType, false)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+
+	// Check if this is a type from another (non-core) module, which is currently
+	// not allowed
+	sourceModuleName, ok := schemaView.sourceModuleName(returnASTType)
+	if ok && sourceModuleName != coreModuleName {
+		return nil, nil, fmt.Errorf("object %q function %q cannot return external type from dependency module %q",
+			parentTypeDef.OriginalName,
+			fn.OriginalName,
+			sourceModuleName,
+		)
 	}
 
 	var argASTTypes ast.ArgumentDefinitionList
 	for _, fnArg := range fn.Args {
 		argASTType, err := s.typeDefToSchema(fnArg.TypeDef, true)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
+
+		// Check if this is a type from another (non-core) module, which is currently
+		// not allowed
+		sourceModuleName, ok := schemaView.sourceModuleName(argASTType)
+		if ok && sourceModuleName != coreModuleName {
+			return nil, nil, fmt.Errorf("object %q function %q arg %q cannot reference external type from dependency module %q",
+				parentTypeDef.OriginalName,
+				fn.OriginalName,
+				fnArg.OriginalName,
+				sourceModuleName,
+			)
+		}
+
 		defaultValue, err := astDefaultValue(fnArg.TypeDef, fnArg.DefaultValue)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		argASTTypes = append(argASTTypes, &ast.ArgumentDefinition{
 			Name:         gqlArgName(fnArg.Name),
@@ -965,24 +1069,35 @@ func (s *moduleSchema) functionResolver(
 		})
 	}
 
+	argNames := make(map[string]string, len(fn.Args))
+	argFromIDs := make(map[string]func(any) (any, error), len(fn.Args))
+	for _, arg := range fn.Args {
+		argNames[arg.Name] = arg.OriginalName
+
+		// decode args for types that are in this module
+		// modules only understand IDs for external types, they only see JSON
+		// representations of their own types, so we need to decode those here
+		if obj := arg.TypeDef.Underlying(); obj.Kind == core.TypeDefKindObject {
+			if _, ok := schemaView.resolvers()[obj.AsObject.Name]; !ok {
+				argFromIDs[arg.Name] = s.createIDResolver(arg.TypeDef, schemaView)
+			}
+		}
+	}
+
 	fieldDef := &ast.FieldDefinition{
 		Name:        fnName,
 		Description: formatGqlDescription(fn.Description),
 		Type:        returnASTType,
 		Arguments:   argASTTypes,
 	}
-	parentObj.Fields = append(parentObj.Fields, fieldDef)
 
 	// Our core "id-able" types are serialized as their ID over the wire, but need to be decoded into
 	// their object here. We can identify those types since their object resolvers are wrapped in
 	// ToIDableObjectResolver.
-	var returnIDableObjectResolver IDableObjectResolver
-	if fn.ReturnType.Kind == core.TypeDefKindObject {
-		returnIDableObjectResolver, _ = s.idableObjectResolver(fn.ReturnType.AsObject.Name, dest)
-	}
-	parentIDableObjectResolver, _ := s.idableObjectResolver(parentObj.Name, dest)
+	returnFromID := s.createIDResolver(fn.ReturnType, schemaView)
+	parentIDableObjectResolver, _ := s.idableObjectResolver(parentTypeDef.Name, schemaView)
 
-	return ToResolver(func(ctx context.Context, parent any, args map[string]any) (_ any, rerr error) {
+	resolver := ToResolver(func(ctx context.Context, parent any, args map[string]any) (_ any, rerr error) {
 		defer func() {
 			if r := recover(); r != nil {
 				rerr = fmt.Errorf("panic in %s: %s %s", objFnName, r, string(debug.Stack()))
@@ -996,19 +1111,22 @@ func (s *moduleSchema) functionResolver(
 			parent = id
 		}
 
-		argNames := make(map[string]string, len(fn.Args))
-		for _, arg := range fn.Args {
-			argNames[arg.Name] = arg.OriginalName
-		}
-
 		var callInput []*core.CallInput
 		for k, v := range args {
-			n, ok := argNames[k]
+			name, ok := argNames[k]
 			if !ok {
 				continue
 			}
+
+			if argFromID := argFromIDs[k]; argFromID != nil {
+				v, err = argFromID(v)
+				if err != nil {
+					return nil, fmt.Errorf("failed to decode arg %q: %w", k, err)
+				}
+			}
+
 			callInput = append(callInput, &core.CallInput{
-				Name:  n,
+				Name:  name,
 				Value: v,
 			})
 		}
@@ -1021,16 +1139,13 @@ func (s *moduleSchema) functionResolver(
 		if err != nil {
 			return nil, fmt.Errorf("failed to call function %q: %w", objFnName, err)
 		}
-		if returnIDableObjectResolver == nil {
-			return result, nil
+		if returnFromID != nil {
+			return returnFromID(result)
 		}
+		return result, nil
+	})
 
-		id, ok := result.(string)
-		if !ok {
-			return nil, fmt.Errorf("expected string ID result for %s, got %T", objFnName, result)
-		}
-		return returnIDableObjectResolver.FromID(id)
-	}), nil
+	return fieldDef, resolver, nil
 }
 
 // relevant ast code we need to work with here:
@@ -1200,6 +1315,67 @@ func (s *moduleSchema) namespaceTypeDef(typeDef *core.TypeDef, mod *core.Module,
 			}
 		}
 	}
+}
+
+// createIDResolver returns a function that can be used to convert an ID to
+// the object it represents.
+//
+// However, unlike just calling the resolver directly, this function will also
+// attempt convering lists of ids into lists of objects (which is a trickier
+// case, because lists are composite data types, lists of lists are possible,
+// etc.)
+func (s *moduleSchema) createIDResolver(typeDef *core.TypeDef, schemaView *schemaView) func(any) (any, error) {
+	switch typeDef.Kind {
+	case core.TypeDefKindObject:
+		resolver, _ := s.idableObjectResolver(typeDef.AsObject.Name, schemaView)
+		if resolver != nil {
+			return func(a any) (any, error) {
+				s, ok := a.(string)
+				if !ok {
+					return nil, fmt.Errorf("expected string %sID, got %T", typeDef.AsObject.Name, a)
+				}
+				return resolver.FromID(s)
+			}
+		} else {
+			return func(a any) (any, error) {
+				id, ok := a.(string)
+				if !ok {
+					if _, ok := a.(map[string]any); ok {
+						return a, nil
+					}
+					return nil, fmt.Errorf("expected map %s, or string %sID, got %T", typeDef.AsObject.Name, typeDef.AsObject.Name, a)
+				}
+
+				value, err := resourceid.DecodeModuleID(id, typeDef.AsObject.Name)
+				if err != nil {
+					return nil, err
+				}
+				return value, nil
+			}
+		}
+	case core.TypeDefKindList:
+		fromID := s.createIDResolver(typeDef.AsList.ElementTypeDef, schemaView)
+		if fromID != nil {
+			return func(a any) (any, error) {
+				li, ok := a.([]any)
+				if !ok {
+					return nil, fmt.Errorf("expected slice, got %T", a)
+				}
+
+				res := make([]any, len(li))
+				for i, elem := range li {
+					fromIDVal, err := fromID(elem)
+					if err != nil {
+						return nil, err
+					}
+					res[i] = fromIDVal
+				}
+				return res, nil
+			}
+		}
+	}
+
+	return nil
 }
 
 // TODO: all these should be called during creation of Function+TypeDefs, not scattered all over the place

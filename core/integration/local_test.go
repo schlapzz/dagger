@@ -10,6 +10,7 @@ import (
 )
 
 func TestLocalImportsAcrossSessions(t *testing.T) {
+	t.Parallel()
 	tmpdir := t.TempDir()
 
 	c1, ctx1 := connect(t)
@@ -20,7 +21,7 @@ func TestLocalImportsAcrossSessions(t *testing.T) {
 
 	hostDir1 := c1.Host().Directory(tmpdir)
 
-	out1, err := c1.Container().From("alpine:3.16.2").
+	out1, err := c1.Container().From(alpineImage).
 		WithMountedDirectory("/mnt", hostDir1).
 		WithExec([]string{"cat", "/mnt/" + fileName}).
 		Stdout(ctx1)
@@ -41,7 +42,7 @@ func TestLocalImportsAcrossSessions(t *testing.T) {
 
 	hostDir2 := c2.Host().Directory(tmpdir)
 
-	out2, err := c2.Container().From("alpine:3.18").
+	out2, err := c2.Container().From(alpineImage).
 		WithMountedDirectory("/mnt", hostDir2).
 		WithExec([]string{"cat", "/mnt/" + fileName}).
 		Stdout(ctx2)

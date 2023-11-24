@@ -44,6 +44,7 @@ func engineClientContainer(ctx context.Context, t *testing.T, c *dagger.Client, 
 }
 
 func TestEngineExitsZeroOnSignal(t *testing.T) {
+	t.Parallel()
 	c, ctx := connect(t)
 
 	// engine should shutdown with exit code 0 when receiving SIGTERM
@@ -105,6 +106,7 @@ func TestClientWaitsForEngine(t *testing.T) {
 }
 
 func TestEngineSetsNameFromEnv(t *testing.T) {
+	t.Parallel()
 	c, ctx := connect(t)
 
 	engineName := "my-special-engine"
@@ -166,6 +168,7 @@ func TestDaggerRun(t *testing.T) {
 }
 
 func TestClientSendsLabelsInTelemetry(t *testing.T) {
+	t.Parallel()
 	c, ctx := connect(t)
 
 	devEngine := devEngineContainer(c).
@@ -195,7 +198,7 @@ func TestClientSendsLabelsInTelemetry(t *testing.T) {
 	eventsVol := c.CacheVolume("dagger-dev-engine-events-" + identity.NewID())
 
 	withCode := c.Container().
-		From("golang:1.20.6-alpine").
+		From(golangImage).
 		WithExec([]string{"apk", "add", "git"}).
 		With(goCache(c)).
 		WithMountedDirectory("/src", code).
